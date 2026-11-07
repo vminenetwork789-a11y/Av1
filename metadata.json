@@ -1,0 +1,8 @@
+{
+  "name": "FractalFlowMatrix27 Web3 DApp",
+  "description": "FractalFlowMatrix27 Smart Contract Control Panel, Matrix Visualizer, Batch Simulation, and Reward Event Tracker on BNB Testnet",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

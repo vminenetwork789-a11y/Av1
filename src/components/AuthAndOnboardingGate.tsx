@@ -1,0 +1,479 @@
+import React, { useState } from 'react';
+import {
+  Wallet,
+  ShieldCheck,
+  Sparkles,
+  ArrowRight,
+  UserPlus,
+  CheckCircle2,
+  AlertCircle,
+  ExternalLink,
+  LogOut,
+  RefreshCw,
+  Search,
+  Layers,
+  Copy,
+  Check,
+  Eye,
+  KeyRound,
+  Network,
+} from 'lucide-react';
+import { RegisterSection } from './RegisterSection';
+import { MatrixTreeVisualizer } from './MatrixTreeVisualizer';
+import { TransactionToast } from './TransactionToast';
+import { ApplicantItem, PlacementMode } from '../utils/offChainSimulator';
+import { UserProfile } from '../types';
+
+interface AuthAndOnboardingGateProps {
+  mode: 'login' | 'Checking' | 'register_onboarding';
+  language: 'th' | 'en';
+  onToggleLanguage: () => void;
+  account: string | null;
+  detectedBrowserWallet: string | null;
+  chainId: number | null;
+  isBscTestnet: boolean;
+  isConnecting: boolean;
+  isLoadingProfile: boolean;
+  profile: UserProfile | null;
+  usdtBalance: string;
+  bnbBalance: string;
+  allowance: string;
+  contractAddress: string;
+  usdtAddress: string;
+  txState: {
+    isLoading: boolean;
+    step: string;
+    txHash: string | null;
+    error: string | null;
+    successMessage: string | null;
+  };
+  onClearTxState: () => void;
+  onConnectWallet: () => void;
+  onLoginCustomInput: (input: string) => Promise<boolean>;
+  onLoginDemoUnregisteredWallet: () => Promise<void>;
+  onDisconnect: () => void;
+  onSwitchNetwork: () => void;
+  onRefresh: () => void;
+  onEnterGuestDashboard: () => void;
+  onApproveUsdt: (amountUsdt?: number) => Promise<any>;
+  onRegister: (
+    sponsorNodeId: number,
+    autoOptions?: {
+      targetParentId?: number | string;
+      isLeft?: boolean;
+      mode?: PlacementMode;
+    }
+  ) => Promise<any>;
+  onExecuteOffChainBatch: (
+    sponsorNodeId: number,
+    applicantsQueue: ApplicantItem[],
+    onStatusCallback?: (msg: string) => void,
+    mode?: PlacementMode
+  ) => Promise<any>;
+  onCheckSponsor: (
+    sponsorNodeId: number
+  ) => Promise<{ isValid: boolean; reason: string; sponsorAddress: string }>;
+  onPreviewPlacement: (
+    rank: number,
+    sponsorAddr: string
+  ) => Promise<{ targetParentId: string; isLeft: boolean; activeRound: number } | null>;
+  onUpgradeToRank: (rank: number) => Promise<any>;
+}
+
+export const AuthAndOnboardingGate: React.FC<AuthAndOnboardingGateProps> = ({
+  mode,
+  language,
+  onToggleLanguage,
+  account,
+  detectedBrowserWallet,
+  chainId,
+  isBscTestnet,
+  isConnecting,
+  profile,
+  usdtBalance,
+  bnbBalance,
+  allowance,
+  contractAddress,
+  usdtAddress,
+  txState,
+  onClearTxState,
+  onConnectWallet,
+  onLoginCustomInput,
+  onLoginDemoUnregisteredWallet,
+  onDisconnect,
+  onSwitchNetwork,
+  onRefresh,
+  onEnterGuestDashboard,
+  onApproveUsdt,
+  onRegister,
+  onExecuteOffChainBatch,
+  onCheckSponsor,
+  onPreviewPlacement,
+  onUpgradeToRank,
+}) => {
+  const [customLoginInput, setCustomLoginInput] = useState<string>('');
+  const [copiedWallet, setCopiedWallet] = useState<boolean>(false);
+  const [showLiveTreeOnRegisterPage, setShowLiveTreeOnRegisterPage] = useState<boolean>(true);
+
+  const handleCopyWallet = (addr: string) => {
+    navigator.clipboard.writeText(addr);
+    setCopiedWallet(true);
+    setTimeout(() => setCopiedWallet(false), 1800);
+  };
+
+  const handleCustomSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!customLoginInput.trim()) return;
+    await onLoginCustomInput(customLoginInput);
+  };
+
+  // ============================================================================
+  // 1. หน้าเข้าสู่ระบบ (WEB3 LOGIN SCREEN)
+  // ============================================================================
+  if (mode === 'login') {
+    return (
+      <div className="min-h-screen w-full bg-[#070b16] text-slate-100 flex flex-col justify-between relative overflow-hidden">
+        {/* Background Ambient Glow */}
+        <div className="pointer-events-none fixed inset-0 overflow-hidden">
+          <div className="absolute -top-32 left-1/2 -translate-x-1/2 w-[680px] h-[360px] bg-emerald-500/10 blur-[130px] rounded-full" />
+          <div className="absolute bottom-0 right-0 w-[500px] h-[320px] bg-indigo-500/10 blur-[130px] rounded-full" />
+        </div>
+
+        {/* Top Bar */}
+        <header className="relative z-10 w-full border-b border-slate-800/80 bg-slate-950/70 backdrop-blur-md">
+          <div className="max-w-6xl mx-auto px-4 sm:px-6 py-3.5 flex items-center justify-between gap-3">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-emerald-500/25 via-teal-500/20 to-indigo-500/25 border border-emerald-500/40 flex items-center justify-center text-emerald-400 font-mono font-black text-lg shadow-lg shadow-emerald-950/50">
+                F27
+              </div>
+              <div>
+                <h1 className="text-base sm:text-lg font-bold bg-gradient-to-r from-emerald-400 via-teal-300 to-indigo-300 bg-clip-text text-transparent">
+                  FractalFlowMatrix27
+                </h1>
+                <div className="flex items-center gap-2 text-[11px] text-slate-400">
+                  <span className="text-emerald-400 font-medium">BNB Smart Chain Testnet (97)</span>
+                  <span>•</span>
+                  <a
+                    href={`https://testnet.bscscan.com/address/${contractAddress}`}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="font-mono text-amber-400 hover:underline inline-flex items-center gap-1"
+                  >
+                    {contractAddress.substring(0, 6)}...{contractAddress.substring(contractAddress.length - 4)}
+                    <ExternalLink className="w-2.5 h-2.5" />
+                  </a>
+                </div>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2">
+              <button
+                onClick={onEnterGuestDashboard}
+                className="text-xs px-3 py-1.5 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-700/80 text-slate-300 hover:text-white transition inline-flex items-center gap-1.5 cursor-pointer"
+              >
+                <Eye className="w-3.5 h-3.5 text-indigo-400" />
+                <span className="hidden sm:inline">
+                  {language === 'th' ? 'ดูผังโครงสร้างรวม' : 'Preview Matrix'}
+                </span>
+              </button>
+              <button
+                onClick={onToggleLanguage}
+                className="text-xs bg-slate-900 hover:bg-slate-800 border border-slate-700 px-3 py-1.5 rounded-xl font-mono text-slate-200 transition cursor-pointer"
+              >
+                {language === 'th' ? '🇬🇧 EN' : '🇹🇭 TH'}
+              </button>
+            </div>
+          </div>
+        </header>
+
+        {/* Main Centered Login Content */}
+        <main className="relative z-10 flex-grow flex items-center justify-center px-4 py-8 sm:py-12">
+          <div className="w-full max-w-xl space-y-6">
+            {/* Framer Motion Blockchain Transaction Toast */}
+            <TransactionToast
+              txState={txState}
+              onClear={onClearTxState}
+              language={language}
+            />
+
+            {/* Login Hero Card */}
+            <div className="bg-slate-900/90 border border-slate-800/90 rounded-3xl p-6 sm:p-8 shadow-2xl shadow-black/60 backdrop-blur-xl space-y-6">
+              {/* Title */}
+              <div className="text-center">
+                <h2 className="text-2xl sm:text-3xl font-extrabold tracking-tight text-white">
+                  {language === 'th' ? 'เข้าสู่ระบบ FractalFlow Matrix 27' : 'Sign In to FractalFlow Matrix 27'}
+                </h2>
+              </div>
+
+              {/* Detected Browser Wallet Banner */}
+              {detectedBrowserWallet && (
+                <div className="p-3.5 rounded-2xl bg-emerald-950/35 border border-emerald-500/30 flex items-center justify-between gap-3">
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse shrink-0" />
+                    <div className="min-w-0">
+                      <div className="text-[11px] text-emerald-300 font-semibold">
+                        {language === 'th'
+                          ? 'ตรวจพบกระเป๋า Web3 ในเบราว์เซอร์ของคุณ:'
+                          : 'Detected Browser Wallet:'}
+                      </div>
+                      <div className="text-xs font-mono text-white truncate">
+                        {detectedBrowserWallet}
+                      </div>
+                    </div>
+                  </div>
+                  <button
+                    onClick={onConnectWallet}
+                    disabled={isConnecting}
+                    className="px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold shrink-0 transition cursor-pointer"
+                  >
+                    {language === 'th' ? 'ใช้กระเป๋านี้' : 'Use Wallet'}
+                  </button>
+                </div>
+              )}
+
+              {/* Primary Button: Connect Web3 Wallet */}
+              <div className="space-y-3">
+                <button
+                  onClick={onConnectWallet}
+                  disabled={isConnecting}
+                  className="w-full py-4 px-6 rounded-2xl bg-gradient-to-r from-emerald-600 via-teal-600 to-emerald-600 hover:from-emerald-500 hover:via-teal-500 hover:to-emerald-500 text-white font-bold text-base shadow-xl shadow-emerald-950/60 border border-emerald-400/30 transition duration-200 flex items-center justify-center gap-3 cursor-pointer disabled:opacity-60"
+                >
+                  {isConnecting ? (
+                    <>
+                      <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                      <span>
+                        {language === 'th'
+                          ? 'กำลังเชื่อมต่อและตรวจสอบข้อมูลบนบล็อกเชน...'
+                          : 'Connecting & Verifying Wallet...'}
+                      </span>
+                    </>
+                  ) : (
+                    <>
+                      <Wallet className="w-5 h-5" />
+                      <span>
+                        {language === 'th'
+                          ? 'เข้าสู่ระบบด้วยกระเป๋า Web3 (MetaMask / TrustWallet)'
+                          : 'Login with Web3 Wallet (MetaMask / TrustWallet)'}
+                      </span>
+                      <ArrowRight className="w-5 h-5" />
+                    </>
+                  )}
+                </button>
+              </div>
+
+              {/* Divider */}
+              <div className="relative flex items-center py-1">
+                <div className="flex-grow border-t border-slate-800" />
+                <span className="shrink-0 px-3 text-[11px] uppercase tracking-wider text-slate-500 font-semibold">
+                  {language === 'th'
+                    ? 'หรือ เข้าสู่ระบบด้วยเลขกระเป๋า 0x... / รหัสสมาชิก #ID'
+                    : 'OR LOGIN WITH WALLET ADDRESS / NODE ID'}
+                </span>
+                <div className="flex-grow border-t border-slate-800" />
+              </div>
+
+              {/* Manual Address or Node ID Login Form */}
+              <form onSubmit={handleCustomSubmit} className="space-y-3">
+                <div className="flex flex-col sm:flex-row gap-2">
+                  <div className="relative flex-grow">
+                    <KeyRound className="w-4 h-4 text-slate-500 absolute left-3.5 top-1/2 -translate-y-1/2" />
+                    <input
+                      type="text"
+                      value={customLoginInput}
+                      onChange={(e) => setCustomLoginInput(e.target.value)}
+                      placeholder={
+                        language === 'th'
+                          ? 'วางเลขกระเป๋า 0x... หรือพิมพ์รหัสสมาชิก เช่น 1, 2'
+                          : 'Paste wallet 0x... or enter Node ID e.g. 1, 2'
+                      }
+                      className="w-full bg-slate-950 border border-slate-800 focus:border-emerald-500 rounded-xl pl-10 pr-3.5 py-2.5 text-xs sm:text-sm text-white placeholder:text-slate-500 focus:outline-none font-mono"
+                    />
+                  </div>
+                  <button
+                    type="submit"
+                    disabled={isConnecting || !customLoginInput.trim()}
+                    className="px-4 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white font-semibold text-xs sm:text-sm transition inline-flex items-center justify-center gap-1.5 shrink-0 cursor-pointer"
+                  >
+                    <Search className="w-4 h-4" />
+                    <span>{language === 'th' ? 'ตรวจสอบ & เข้าสู่ระบบ' : 'Check & Login'}</span>
+                  </button>
+                </div>
+
+                {/* Quick Action Pills for Testing */}
+                <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
+                  <button
+                    type="button"
+                    onClick={onLoginDemoUnregisteredWallet}
+                    disabled={isConnecting}
+                    className="flex-1 min-w-[200px] py-2 px-3 rounded-xl bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/35 text-amber-300 text-xs font-semibold transition inline-flex items-center justify-center gap-1.5 cursor-pointer"
+                  >
+                    <UserPlus className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                    <span>
+                      {language === 'th'
+                        ? 'จำลองกระเป๋าใหม่ (ทดสอบหน้าฟอร์มสมัคร)'
+                        : 'Test New Unregistered Wallet'}
+                    </span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => onLoginCustomInput('1')}
+                    disabled={isConnecting}
+                    className="py-2 px-3 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 hover:text-white text-xs font-semibold transition inline-flex items-center justify-center gap-1.5 cursor-pointer"
+                  >
+                    <Sparkles className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                    <span>{language === 'th' ? 'เข้าด้วยรหัส #1 (Root)' : 'Login as #1 (Root)'}</span>
+                  </button>
+                </div>
+              </form>
+            </div>
+
+            {/* Active Smart Contract Footer Info */}
+            <div className="p-4 rounded-2xl bg-slate-900/60 border border-slate-800/80 flex flex-col sm:flex-row items-center justify-between gap-2 text-xs text-slate-400">
+              <div className="flex items-center gap-2">
+                <Network className="w-4 h-4 text-emerald-400 shrink-0" />
+                <span>Smart Contract:</span>
+                <span className="font-mono text-emerald-300 break-all">{contractAddress}</span>
+              </div>
+              <button
+                onClick={onEnterGuestDashboard}
+                className="text-indigo-400 hover:text-indigo-300 font-semibold underline shrink-0 cursor-pointer"
+              >
+                {language === 'th' ? 'เข้าสู่แดชบอร์ดโดยไม่ล็อกอิน →' : 'Continue as Guest →'}
+              </button>
+            </div>
+          </div>
+        </main>
+      </div>
+    );
+  }
+
+  // ============================================================================
+  // 2. หน้ากำลังตรวจสอบข้อมูลกระเป๋า (CHECKING WALLET ON SMART CONTRACT)
+  // ============================================================================
+  if (mode === 'Checking') {
+    return (
+      <div className="min-h-screen w-full bg-[#070b16] text-slate-100 flex flex-col items-center justify-center p-4">
+        <div className="max-w-md w-full bg-slate-900/90 border border-slate-800 rounded-3xl p-8 text-center space-y-5 shadow-2xl">
+          <div className="w-14 h-14 rounded-2xl bg-emerald-500/15 border border-emerald-500/30 flex items-center justify-center mx-auto">
+            <div className="w-7 h-7 border-3 border-emerald-400 border-t-transparent rounded-full animate-spin" />
+          </div>
+          <div className="space-y-1.5">
+            <h3 className="text-lg font-bold text-white">
+              {language === 'th'
+                ? 'กำลังตรวจสอบสถานะกระเป๋า...'
+                : 'Verifying Wallet...'}
+            </h3>
+            {account && (
+              <p className="text-xs font-mono text-emerald-400 break-all px-2">{account}</p>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // ============================================================================
+  // 3. หน้าฟอร์มสมัครสมาชิกสำหรับกระเป๋าที่ยังไม่เคยสมัคร (NEW WALLET REGISTRATION PAGE)
+  // ============================================================================
+  return (
+    <div className="min-h-screen w-full bg-[#070b16] text-slate-100 flex flex-col justify-between">
+      {/* Sticky Onboarding Top Bar */}
+      <header className="w-full bg-slate-950/95 backdrop-blur-md border-b border-amber-500/30 sticky top-0 z-40">
+        <div className="max-w-6xl mx-auto px-3 sm:px-6 py-3 flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-xl bg-amber-500/20 border border-amber-500/40 flex items-center justify-center text-amber-300 font-mono font-black text-base">
+              F27
+            </div>
+            <div>
+              <div className="flex items-center gap-2 flex-wrap">
+                <h1 className="text-sm sm:text-base font-bold text-white">
+                  {language === 'th'
+                    ? 'หน้าฟอร์มสมัครสมาชิกใหม่ (New Member Registration)'
+                    : 'New Member Registration Form'}
+                </h1>
+                <span className="text-[10px] font-bold uppercase px-2 py-0.5 rounded-md bg-amber-500/20 text-amber-300 border border-amber-500/40">
+                  {language === 'th' ? 'กระเป๋านี้ยังไม่เคยสมัคร' : 'Unregistered Wallet'}
+                </span>
+              </div>
+              <div className="text-[11px] text-slate-400 flex items-center gap-2 mt-0.5">
+                <span>Contract:</span>
+                <a
+                  href={`https://testnet.bscscan.com/address/${contractAddress}`}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="font-mono text-emerald-400 hover:underline inline-flex items-center gap-1"
+                >
+                  {contractAddress.substring(0, 8)}...{contractAddress.substring(contractAddress.length - 6)}
+                  <ExternalLink className="w-2.5 h-2.5" />
+                </a>
+              </div>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2 flex-wrap">
+            <button
+              onClick={onEnterGuestDashboard}
+              className="text-xs px-3 py-1.5 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-200 transition inline-flex items-center gap-1.5 cursor-pointer"
+            >
+              <Eye className="w-3.5 h-3.5 text-indigo-400" />
+              <span>
+                {language === 'th' ? 'เปิดดูหน้าแดชบอร์ดรวม' : 'View Full Dashboard'}
+              </span>
+            </button>
+
+            <button
+              onClick={onRefresh}
+              className="p-2 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-300 hover:text-white transition cursor-pointer"
+              title={language === 'th' ? 'ตรวจสอบสถานะกระเป๋าอีกครั้ง' : 'Refresh Wallet Status'}
+            >
+              <RefreshCw className="w-3.5 h-3.5" />
+            </button>
+
+            <button
+              onClick={onToggleLanguage}
+              className="text-xs bg-slate-900 hover:bg-slate-800 border border-slate-700 px-2.5 py-1.5 rounded-xl font-mono text-slate-200 transition cursor-pointer"
+            >
+              {language === 'th' ? '🇬🇧 EN' : '🇹🇭 TH'}
+            </button>
+
+            <button
+              onClick={onDisconnect}
+              className="text-xs px-3 py-1.5 rounded-xl bg-rose-950/70 hover:bg-rose-900/80 border border-rose-500/40 text-rose-200 font-semibold transition inline-flex items-center gap-1.5 cursor-pointer"
+            >
+              <LogOut className="w-3.5 h-3.5" />
+              <span>{language === 'th' ? 'สลับกระเป๋า / ออก' : 'Switch Wallet'}</span>
+            </button>
+          </div>
+        </div>
+      </header>
+
+      {/* Main Onboarding Body: แสดงเฉพาะผังต้นไม้ไบนารี่เท่านั้น แบบเต็มหน้าจอ Max */}
+      <main className="flex-grow w-full max-w-none mx-auto px-1 sm:px-2.5 py-1.5 sm:py-3 flex flex-col space-y-2.5">
+        {/* Framer Motion Blockchain Transaction Toast */}
+        <TransactionToast
+          txState={txState}
+          onClear={onClearTxState}
+          language={language}
+        />
+
+        <MatrixTreeVisualizer
+          language={language}
+          userAddress={account}
+          chainId={chainId}
+          isBscTestnet={isBscTestnet}
+          contractAddress={contractAddress}
+          usdtBalance={usdtBalance}
+          allowance={allowance}
+          onConnectWallet={onConnectWallet}
+          onSwitchNetwork={onSwitchNetwork}
+          onApproveUsdt={onApproveUsdt}
+          onRegisterWithSponsor={onRegister}
+          onUpgradeToRank={onUpgradeToRank}
+          lastTxSuccess={txState.successMessage}
+          refreshTrigger={txState.successMessage}
+        />
+      </main>
+    </div>
+  );
+};
