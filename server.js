@@ -127,10 +127,18 @@ function broadcastAllMatrixUpdates() {
 }
 dotenv.config();
 process.on("unhandledRejection", (reason) => {
-  console.warn("[Process Guard] Unhandled Rejection:", reason);
+  const msg = reason?.shortMessage || reason?.message || String(reason);
+  if (msg.includes("provider destroyed") || reason?.operation === "eth_unsubscribe") {
+    return;
+  }
+  console.error("[Process Guard] Unhandled Rejection:", reason);
 });
 process.on("uncaughtException", (err) => {
-  console.warn("[Process Guard] Uncaught Exception:", err);
+  const msg = err?.shortMessage || err?.message || String(err);
+  if (msg.includes("provider destroyed") || err?.operation === "eth_unsubscribe") {
+    return;
+  }
+  console.error("[Process Guard] Uncaught Exception:", err);
 });
 var { Pool } = pg;
 var __filename = fileURLToPath(import.meta.url);
@@ -2029,32 +2037,29 @@ async function cleanupWebSocket() {
     clearInterval(wsHeartbeatTimer);
     wsHeartbeatTimer = null;
   }
-  if (wsBotContract) {
-    try {
-      await wsBotContract.removeAllListeners();
-    } catch {
-    }
-    wsBotContract = null;
-  }
-  if (wsBotProvider) {
-    try {
-      await wsBotProvider.removeAllListeners();
-    } catch {
-    }
-    try {
-      const rawWs = wsBotProvider.websocket;
-      if (rawWs && typeof rawWs.removeAllListeners === "function") {
-        rawWs.removeAllListeners();
-      }
-    } catch {
-    }
-    try {
-      await wsBotProvider.destroy();
-    } catch {
-    }
-    wsBotProvider = null;
-  }
   eventListenerActive = false;
+  try {
+    if (wsBotContract) {
+      await wsBotContract.removeAllListeners().catch(() => {
+      });
+      wsBotContract = null;
+    }
+    if (wsBotProvider) {
+      await wsBotProvider.removeAllListeners().catch(() => {
+      });
+      try {
+        const rawWs = wsBotProvider.websocket;
+        if (rawWs && typeof rawWs.removeAllListeners === "function") {
+          rawWs.removeAllListeners();
+        }
+      } catch {
+      }
+      await Promise.resolve(wsBotProvider.destroy()).catch(() => {
+      });
+      wsBotProvider = null;
+    }
+  } catch (err) {
+  }
 }
 function scheduleReconnect(reason) {
   if (wsIsReconnecting) return;
@@ -2099,7 +2104,8 @@ function startWsHeartbeat() {
     } catch (err) {
       const msg = err?.message || String(err);
       console.warn(`\u274C [WS-Bot Heartbeat] \u0E15\u0E23\u0E27\u0E08\u0E1E\u0E1A\u0E2A\u0E32\u0E22\u0E04\u0E49\u0E32\u0E07 (Silent Drop): ${msg}`);
-      await cleanupWebSocket();
+      await cleanupWebSocket().catch(() => {
+      });
       scheduleReconnect(`Heartbeat Timeout (${msg})`);
     }
   }, HEARTBEAT_INTERVAL_MS);
@@ -2147,7 +2153,8 @@ async function startEventListener() {
     wsReconnectTimer = null;
   }
   wsIsReconnecting = false;
-  await cleanupWebSocket();
+  await cleanupWebSocket().catch(() => {
+  });
   const activeWssUrl = WSS_ENDPOINTS[wsEndpointIndex % WSS_ENDPOINTS.length];
   try {
     wsBotProvider = new ethers.WebSocketProvider(activeWssUrl, {
@@ -2156,7 +2163,8 @@ async function startEventListener() {
     });
     const rawWs = wsBotProvider.websocket;
     const onSocketClose = async (code) => {
-      await cleanupWebSocket();
+      await cleanupWebSocket().catch(() => {
+      });
       scheduleReconnect(`WebSocket Close (code=${String(code ?? "unknown")})`);
     };
     const onSocketError = (err) => {
@@ -2222,7 +2230,8 @@ async function startEventListener() {
     });
   } catch (err) {
     const msg = err?.message || String(err);
-    await cleanupWebSocket();
+    await cleanupWebSocket().catch(() => {
+    });
     scheduleReconnect(`Handshake Error (${msg})`);
   }
 }
@@ -3516,19 +3525,6 @@ async function startApp() {
       0,
       Number((extraLeftVaultBonusGross - deductedFromExtraLeftBonus).toFixed(4))
     );
-    const r1To3LeftoverOldVault = 0;
-    const oldCarryoverVault = Number(
-      (r4To27OutsideWindow + extraLeftVaultBonus).toFixed(4)
-    );
-    const newExtraIdPool = Number(
-      (r4To27OutsideWindow + extraLeftVaultBonus).toFixed(4)
-    );
-    const newExtraIdPoolGross = Number(
-      Math.max(
-        grossR4To27OutsideWindow + extraLeftVaultBonusGross,
-        newExtraIdPool + extraIdDeductedTotalUsdt
-      ).toFixed(4)
-    );
     const autoMainSourceMap = reconcileRank1AutoMainIds();
     const spawnedAutoIdsList = [];
     for (const [autoId, srcMain] of autoMainSourceMap.entries()) {
@@ -3536,9 +3532,39 @@ async function startApp() {
         spawnedAutoIdsList.push(autoId);
       }
     }
+    const autoIdsUsedUsdt = Number((spawnedAutoIdsList.length * 5).toFixed(4));
+    let netAutoIdPool = newAutoIdPool;
+    if (netAutoIdPool >= autoIdsUsedUsdt && autoIdsUsedUsdt > 0) {
+      netAutoIdPool = Number((netAutoIdPool - autoIdsUsedUsdt).toFixed(4));
+    }
+    const remExtraDeduction = Math.max(0, Number((extraIdDeductedTotalUsdt - deductedFromExtraLeftBonus).toFixed(4)));
+    let netR4To27 = r4To27OutsideWindow;
+    if (netR4To27 >= remExtraDeduction && remExtraDeduction > 0) {
+      netR4To27 = Number((netR4To27 - remExtraDeduction).toFixed(4));
+    }
+    const oldCarryoverVault = Number(
+      (netR4To27 + extraLeftVaultBonus).toFixed(4)
+    );
+    const newExtraIdPool = Number(
+      (netR4To27 + extraLeftVaultBonus).toFixed(4)
+    );
+    const newExtraIdPoolGross = Number(
+      Math.max(
+        grossR4To27OutsideWindow + extraLeftVaultBonusGross,
+        newExtraIdPool + extraIdDeductedTotalUsdt
+      ).toFixed(4)
+    );
+    const r1To3LeftoverOldVault = 0;
     const upgradeHistory = (matrixDB.upgradeLogs || []).filter(
       (u) => Number(u.mainNodeId) === mainIdNum
     );
+    const upgradeDeductedTotalUsdt = Number(
+      upgradeHistory.reduce((s, u) => s + (Number(u.vaultDeductedUsdt) || 0), 0).toFixed(4)
+    );
+    let netUpgradeRankPool = upgradeRankPool;
+    if (netUpgradeRankPool >= upgradeDeductedTotalUsdt && upgradeDeductedTotalUsdt > 0) {
+      netUpgradeRankPool = Number((netUpgradeRankPool - upgradeDeductedTotalUsdt).toFixed(4));
+    }
     return {
       mainId: mainIdNum,
       owner: targetNode?.owner || ethers.ZeroAddress,
@@ -3546,12 +3572,12 @@ async function startApp() {
       window5Start,
       window5End,
       vaultsByRank,
-      upgradeRankPool: Number(upgradeRankPool.toFixed(2)),
-      newAutoIdPool: Number(newAutoIdPool.toFixed(2)),
+      upgradeRankPool: Number(netUpgradeRankPool.toFixed(2)),
+      newAutoIdPool: Number(netAutoIdPool.toFixed(2)),
       newExtraIdPool: Number(newExtraIdPool.toFixed(2)),
       oldCarryoverVault: Number(oldCarryoverVault.toFixed(2)),
       r1To3LeftoverOldVault: Number(r1To3LeftoverOldVault.toFixed(2)),
-      r4To27OutsideWindowVault: Number(r4To27OutsideWindow.toFixed(2)),
+      r4To27OutsideWindowVault: Number(netR4To27.toFixed(2)),
       extraLeftVaultBonus: Number(extraLeftVaultBonus.toFixed(2)),
       extraLeftVaultBonusGross: Number(extraLeftVaultBonusGross.toFixed(2)),
       extraIdDeductedTotalUsdt: Number(extraIdDeductedTotalUsdt.toFixed(2)),

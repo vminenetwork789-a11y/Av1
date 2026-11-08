@@ -162,11 +162,30 @@ export function broadcastAllMatrixUpdates() {
 dotenv.config();
 
 // Prevent transient public RPC errors from crashing the server process in production
-process.on('unhandledRejection', (reason) => {
-  console.warn('[Process Guard] Unhandled Rejection:', reason);
+process.on('unhandledRejection', (reason: any) => {
+  const msg = reason?.shortMessage || reason?.message || String(reason);
+
+  // ข้าม Error ปกติที่เกิดตอนรีเซ็ต WebSocket ของ Ethers v6
+  if (
+    msg.includes('provider destroyed') ||
+    reason?.operation === 'eth_unsubscribe'
+  ) {
+    return;
+  }
+
+  console.error('[Process Guard] Unhandled Rejection:', reason);
 });
-process.on('uncaughtException', (err) => {
-  console.warn('[Process Guard] Uncaught Exception:', err);
+process.on('uncaughtException', (err: any) => {
+  const msg = err?.shortMessage || err?.message || String(err);
+
+  if (
+    msg.includes('provider destroyed') ||
+    err?.operation === 'eth_unsubscribe'
+  ) {
+    return;
+  }
+
+  console.error('[Process Guard] Uncaught Exception:', err);
 });
 
 import fs from 'fs';
@@ -2754,40 +2773,33 @@ async function cleanupWebSocket(): Promise<void> {
     clearInterval(wsHeartbeatTimer);
     wsHeartbeatTimer = null;
   }
-
-  if (wsBotContract) {
-    try {
-      await wsBotContract.removeAllListeners();
-    } catch {
-      // ignore
-    }
-    wsBotContract = null;
-  }
-
-  if (wsBotProvider) {
-    try {
-      await wsBotProvider.removeAllListeners();
-    } catch {
-      // ignore
-    }
-
-    try {
-      const rawWs = (wsBotProvider as any).websocket;
-      if (rawWs && typeof rawWs.removeAllListeners === 'function') {
-        rawWs.removeAllListeners();
-      }
-    } catch {
-      // ignore
-    }
-
-    try {
-      await wsBotProvider.destroy();
-    } catch {
-      // ignore destroy errors on already-closed socket
-    }
-    wsBotProvider = null;
-  }
   eventListenerActive = false;
+
+  try {
+    // 1. ถอด Listener ของ Contract ออกก่อน และดัก catch กรณีสายหลุดไปแล้ว
+    if (wsBotContract) {
+      await (wsBotContract.removeAllListeners() as any).catch(() => {});
+      wsBotContract = null;
+    }
+
+    // 2. ปิด WebSocketProvider อย่างปลอดภัย
+    if (wsBotProvider) {
+      await (wsBotProvider.removeAllListeners() as any).catch(() => {});
+
+      // ปิดระดับเบื้องล่างของ WebSocket ก่อนหรือดัก catch ที่ destroy()
+      try {
+        const rawWs = (wsBotProvider as any).websocket;
+        if (rawWs && typeof rawWs.removeAllListeners === 'function') {
+          rawWs.removeAllListeners();
+        }
+      } catch {}
+
+      await Promise.resolve(wsBotProvider.destroy()).catch(() => {});
+      wsBotProvider = null;
+    }
+  } catch (err) {
+    // เพิกเฉยต่อ Error ตอนปิดการเชื่อมต่อที่ถูกทำลายไปแล้ว
+  }
 }
 
 /**
@@ -2849,7 +2861,7 @@ function startWsHeartbeat(): void {
     } catch (err: any) {
       const msg = err?.message || String(err);
       console.warn(`❌ [WS-Bot Heartbeat] ตรวจพบสายค้าง (Silent Drop): ${msg}`);
-      await cleanupWebSocket();
+      await cleanupWebSocket().catch(() => {});
       scheduleReconnect(`Heartbeat Timeout (${msg})`);
     }
   }, HEARTBEAT_INTERVAL_MS);
@@ -2910,7 +2922,7 @@ async function startEventListener(): Promise<void> {
   }
   wsIsReconnecting = false;
 
-  await cleanupWebSocket();
+  await cleanupWebSocket().catch(() => {});
 
   const activeWssUrl = WSS_ENDPOINTS[wsEndpointIndex % WSS_ENDPOINTS.length];
   try {
@@ -2921,7 +2933,7 @@ async function startEventListener(): Promise<void> {
 
     const rawWs = (wsBotProvider as any).websocket;
     const onSocketClose = async (code?: unknown) => {
-      await cleanupWebSocket();
+      await cleanupWebSocket().catch(() => {});
       scheduleReconnect(`WebSocket Close (code=${String(code ?? 'unknown')})`);
     };
     const onSocketError = (err?: any) => {
@@ -3006,7 +3018,7 @@ async function startEventListener(): Promise<void> {
     checkAndProcessBotCloneQueue('RECONNECT_RECOVERY').catch(() => {});
   } catch (err: any) {
     const msg = err?.message || String(err);
-    await cleanupWebSocket();
+    await cleanupWebSocket().catch(() => {});
     scheduleReconnect(`Handshake Error (${msg})`);
   }
 }
@@ -4662,20 +4674,6 @@ async function startApp() {
       Number((extraLeftVaultBonusGross - deductedFromExtraLeftBonus).toFixed(4))
     );
 
-    const r1To3LeftoverOldVault = 0;
-    const oldCarryoverVault = Number(
-      (r4To27OutsideWindow + extraLeftVaultBonus).toFixed(4)
-    );
-    const newExtraIdPool = Number(
-      (r4To27OutsideWindow + extraLeftVaultBonus).toFixed(4)
-    );
-    const newExtraIdPoolGross = Number(
-      Math.max(
-        grossR4To27OutsideWindow + extraLeftVaultBonusGross,
-        newExtraIdPool + extraIdDeductedTotalUsdt
-      ).toFixed(4)
-    );
-
     const autoMainSourceMap = reconcileRank1AutoMainIds();
     const spawnedAutoIdsList: number[] = [];
     for (const [autoId, srcMain] of autoMainSourceMap.entries()) {
@@ -4684,9 +4682,43 @@ async function startApp() {
       }
     }
 
+    // หักยอดที่นำไปใช้สร้าง Auto ID (5.00 USDT / รหัส)
+    const autoIdsUsedUsdt = Number((spawnedAutoIdsList.length * 5.0).toFixed(4));
+    let netAutoIdPool = newAutoIdPool;
+    if (netAutoIdPool >= autoIdsUsedUsdt && autoIdsUsedUsdt > 0) {
+      netAutoIdPool = Number((netAutoIdPool - autoIdsUsedUsdt).toFixed(4));
+    }
+
+    // หักยอดที่นำไปใช้สร้าง Extra ID (หักโบนัสเม็ดซ้ายก่อน แล้วหักยอด R4-R27 ที่เหลือ)
+    const remExtraDeduction = Math.max(0, Number((extraIdDeductedTotalUsdt - deductedFromExtraLeftBonus).toFixed(4)));
+    let netR4To27 = r4To27OutsideWindow;
+    if (netR4To27 >= remExtraDeduction && remExtraDeduction > 0) {
+      netR4To27 = Number((netR4To27 - remExtraDeduction).toFixed(4));
+    }
+
+    const oldCarryoverVault = Number(
+      (netR4To27 + extraLeftVaultBonus).toFixed(4)
+    );
+    const newExtraIdPool = Number(
+      (netR4To27 + extraLeftVaultBonus).toFixed(4)
+    );
+    const newExtraIdPoolGross = Number(
+      Math.max(
+        grossR4To27OutsideWindow + extraLeftVaultBonusGross,
+        newExtraIdPool + extraIdDeductedTotalUsdt
+      ).toFixed(4)
+    );
+    const r1To3LeftoverOldVault = 0;
     const upgradeHistory = (matrixDB.upgradeLogs || []).filter(
       (u) => Number(u.mainNodeId) === mainIdNum
     );
+    const upgradeDeductedTotalUsdt = Number(
+      upgradeHistory.reduce((s, u) => s + (Number(u.vaultDeductedUsdt) || 0), 0).toFixed(4)
+    );
+    let netUpgradeRankPool = upgradeRankPool;
+    if (netUpgradeRankPool >= upgradeDeductedTotalUsdt && upgradeDeductedTotalUsdt > 0) {
+      netUpgradeRankPool = Number((netUpgradeRankPool - upgradeDeductedTotalUsdt).toFixed(4));
+    }
 
     return {
       mainId: mainIdNum,
@@ -4695,12 +4727,12 @@ async function startApp() {
       window5Start,
       window5End,
       vaultsByRank,
-      upgradeRankPool: Number(upgradeRankPool.toFixed(2)),
-      newAutoIdPool: Number(newAutoIdPool.toFixed(2)),
+      upgradeRankPool: Number(netUpgradeRankPool.toFixed(2)),
+      newAutoIdPool: Number(netAutoIdPool.toFixed(2)),
       newExtraIdPool: Number(newExtraIdPool.toFixed(2)),
       oldCarryoverVault: Number(oldCarryoverVault.toFixed(2)),
       r1To3LeftoverOldVault: Number(r1To3LeftoverOldVault.toFixed(2)),
-      r4To27OutsideWindowVault: Number(r4To27OutsideWindow.toFixed(2)),
+      r4To27OutsideWindowVault: Number(netR4To27.toFixed(2)),
       extraLeftVaultBonus: Number(extraLeftVaultBonus.toFixed(2)),
       extraLeftVaultBonusGross: Number(extraLeftVaultBonusGross.toFixed(2)),
       extraIdDeductedTotalUsdt: Number(extraIdDeductedTotalUsdt.toFixed(2)),
