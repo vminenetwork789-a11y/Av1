@@ -4546,6 +4546,14 @@ async function startApp() {
     const window5Start = Math.max(1, currentRank - 4);
     const window5End = currentRank;
 
+    // เงื่อนไข Upgrade Pool: เฉพาะไอดี ที่ ไม่ใช่ EXTRA ID, โคลนนิ่ง ของ EXTRA ID
+    const originNodeInR1 = r1Nodes.find((x) => x.id === (targetNode?.originMainId || targetNode?.id));
+    const isExtraOrCloneOfExtra = Boolean(
+      targetNode?.isExtraId ||
+      originNodeInR1?.isExtraId ||
+      (targetNode?.isClone && (targetNode?.isExtraId || originNodeInR1?.isExtraId))
+    );
+
     let upgradeRankPool = 0;
     let newAutoIdPool = 0;
     let r4To27OutsideWindow = 0;
@@ -4554,10 +4562,10 @@ async function startApp() {
     for (let r = 1; r <= 27; r++) {
       const v = vaultsByRank[r] || 0;
       const inWindow5 = r >= window5Start && r <= window5End;
-      if (inWindow5 && currentRank < 27) {
+      if (inWindow5 && currentRank < 27 && !isExtraOrCloneOfExtra) {
         upgradeRankPool += v;
       }
-      if (r >= 1 && r <= 3 && !inWindow5) {
+      if (r >= 1 && r <= 3 && !inWindow5 && !isExtraOrCloneOfExtra) {
         newAutoIdPool += v;
       }
       if (r >= 4 && r <= 27) {

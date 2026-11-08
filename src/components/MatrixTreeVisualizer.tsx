@@ -3804,7 +3804,8 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
           poolMainKey,
           mainIdCurrentRank,
           mainVaultByRank,
-          extraLeftVaultForSponsor
+          extraLeftVaultForSponsor,
+          isExtraLineage
         );
 
         const repForTargetMain = perIdReportsMap.get(targetMainId);
@@ -6885,21 +6886,90 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
           );
         };
 
-        const currentMaxR = Math.max(
-          modalNode.targetMainIdCurrentRank || 1,
-          mainReport?.currentMaxRank || 1,
-          modalNode.rank || 1
+        const currentMaxR =
+          modalNode.targetMainIdCurrentRank ||
+          mainReport?.currentMaxRank ||
+          modalNode.rank ||
+          1;
+
+        // เงื่อนไข Upgrade Pool: เฉพาะไอดี ที่ ไม่ใช่ EXTRA ID, โคลนนิ่ง ของ EXTRA ID
+        const isExtraOrCloneOfExtra = Boolean(
+          modalNode.isExtraLineage ||
+          modalNode.isExtraId ||
+          mainReport?.isExtraId ||
+          (modalNode.isClone && (modalNode.isExtraId || modalNode.isExtraLineage))
         );
+
+        // สูตรคำนวณ Upgrade Pool:
+        // 1. เฉพาะไอดี ที่ ไม่ใช่ EXTRA ID, โคลนนิ่ง ของ EXTRA ID (ถ้าเป็น Extra หรือ Clone ของ Extra ยอดจะเป็น 0 ทันที)
+        // 2. rank < 27: รวมยอด UPGRADE_VAULT 5 Rank ย้อนหลัง (เช่น อยู่ rank 17 ก็รวม 17-16-15-14-13)
+        // 3. rank == 27: ไม่ต้องหายอดละเป็น 0
+        const window5StartRank = Math.max(1, currentMaxR - 4);
+        const window5EndRank = currentMaxR;
+
+        let effectiveUpgradePool = 0;
+        if (!isExtraOrCloneOfExtra && currentMaxR < 27) {
+          if (rankNodesList && rankNodesList.length > 0) {
+            for (const rn of rankNodesList) {
+              const r = Number(rn.rank || 0);
+              if (r >= window5StartRank && r <= window5EndRank) {
+                effectiveUpgradePool += Number(rn.nodeVault ?? rn.rawNodeVault ?? 0);
+              }
+            }
+          } else {
+            effectiveUpgradePool = Number(mainReport?.upgradeRankPool ?? modalNode.upgradeRankPool ?? 0);
+          }
+        }
+
+        // สูตรคำนวณ Auto ID Pool:
+        // - เฉพาะไอดีที่ "ไม่ใช่ EXTRA ID" และ "ไม่ใช่ โคลนนิ่งของ EXTRA ID"
+        // - กรณี rank <= 8: กรอบ 5 Rank ย้อนหลัง [currentRank - 4 ... currentRank] ลบด้วยยอดสะสม Rank 1-3 (คือเอาเฉพาะ Rank 1..3 ที่ r < window5StartRank)
+        // - กรณี rank >= 9: ยอดสะสม Rank 1-3 ทั้งหมด (เพราะหลุดกรอบ 5 Rank ย้อนหลังครบ 100%)
+        let effectiveAutoIdPool = 0;
+        if (!isExtraOrCloneOfExtra) {
+          if (rankNodesList && rankNodesList.length > 0) {
+            for (const rn of rankNodesList) {
+              const r = Number(rn.rank || 0);
+              if (r >= 1 && r <= 3) {
+                if (currentMaxR >= 9 || r < window5StartRank) {
+                  effectiveAutoIdPool += Number(rn.nodeVault ?? rn.rawNodeVault ?? 0);
+                }
+              }
+            }
+          } else {
+            effectiveAutoIdPool = Number(mainReport?.newAutoIdPool ?? modalNode.newAutoIdPool ?? 0);
+          }
+        }
+
+        // สูตรคำนวณ Extra ID Pool:
+        // 1. รายได้เกิดจากไอดี Extra ID (โบนัส 35% เม็ดซ้ายของ Extra ID ที่เกิดขึ้น)
+        // 2. กรณี rank < 27: รวมยอดสะสม UPGRADE_VAULT (35%) ของ rank 4 ถึง 27 ลบด้วย Upgrade Pool (อยู่นอก 5 rank ย้อนหลัง)
+        //    กรณี rank == 27: รวมยอดสะสม UPGRADE_VAULT (35%) ของ rank 4 ถึง 27 ทั้งหมด
+        let effectiveExtraIdPool = 0;
+        if (!isExtraOrCloneOfExtra) {
+          if (rankNodesList && rankNodesList.length > 0) {
+            let r4To27Vault = 0;
+            for (const rn of rankNodesList) {
+              const r = Number(rn.rank || 0);
+              if (r >= 4 && r <= 27) {
+                if (currentMaxR === 27 || r < window5StartRank || r > window5EndRank) {
+                  r4To27Vault += Number(rn.nodeVault ?? rn.rawNodeVault ?? 0);
+                }
+              }
+            }
+            const extraBonus = Number(mainReport?.extraLeftVaultBonus ?? 0);
+            effectiveExtraIdPool = Number((r4To27Vault + extraBonus).toFixed(2));
+          } else {
+            effectiveExtraIdPool = Number(mainReport?.newExtraIdPool ?? modalNode.newExtraIdPool ?? 0);
+          }
+        }
+
         const effectiveTargetRank =
           modalUpgradeTargetRank > currentMaxR
             ? modalUpgradeTargetRank
             : Math.min(27, currentMaxR + 1);
         const targetRankPrice = RANK_PRICES_USDT[effectiveTargetRank - 1] || 10;
-        const curUpgradePoolVal = Number(
-          modalNode.isExtraLineage
-            ? 0
-            : mainReport?.upgradeRankPool ?? modalNode.upgradeRankPool ?? 0
-        );
+        const curUpgradePoolVal = effectiveUpgradePool;
         const poolDeduct = Math.min(curUpgradePoolVal, targetRankPrice);
         const netDiffToPay = Math.max(0, Number((targetRankPrice - poolDeduct).toFixed(2)));
 
@@ -7200,24 +7270,38 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
                         <div className="bg-slate-950/90 border border-amber-500/30 rounded p-1.5 text-center space-y-0.5">
                           <span className="text-slate-400 block">Upgrade Pool</span>
                           <span className="text-amber-400 font-extrabold text-xs block">
-                            {Number(
-                              modalNode.isExtraLineage
-                                ? 0
-                                : mainReport?.upgradeRankPool ?? modalNode.upgradeRankPool ?? 0
-                            ).toFixed(2)}{' '}
-                            U
+                            {effectiveUpgradePool.toFixed(2)} U
                           </span>
+                          {isExtraOrCloneOfExtra ? (
+                            <span className="text-slate-400 text-[9px] block">Extra / โคลน Extra (ไม่มียอด)</span>
+                          ) : currentMaxR >= 27 ? (
+                            <span className="text-slate-400 text-[9px] block">Rank 27 สูงสุด (ยอดเป็น 0 U)</span>
+                          ) : (
+                            <span className="text-amber-300/80 text-[9px] block font-mono">
+                              5 แรงค์ย้อนหลัง (R{window5StartRank}-R{window5EndRank})
+                            </span>
+                          )}
                         </div>
                         <div className="bg-slate-950/90 border border-yellow-500/30 rounded p-1.5 text-center space-y-0.5">
                           <span className="text-slate-400 block">Auto ID Pool</span>
                           <span className="text-yellow-400 font-extrabold text-xs block">
-                            {Number(
-                              modalNode.isExtraLineage
-                                ? 0
-                                : mainReport?.newAutoIdPool ?? modalNode.newAutoIdPool ?? 0
-                            ).toFixed(2)}{' '}
-                            U
+                            {effectiveAutoIdPool.toFixed(2)} U
                           </span>
+                          {isExtraOrCloneOfExtra ? (
+                            <span className="text-slate-400 text-[9px] block">Extra / โคลน Extra (ไม่มียอด)</span>
+                          ) : currentMaxR >= 9 ? (
+                            <span className="text-yellow-300/80 text-[9px] block font-mono">
+                              รวม R1-R3 (Rank ≥ 9 หลุดกรอบครบ)
+                            </span>
+                          ) : window5StartRank > 1 ? (
+                            <span className="text-yellow-300/80 text-[9px] block font-mono">
+                              รวม R1-R{window5StartRank - 1} (พ้นกรอบ 5 Rank)
+                            </span>
+                          ) : (
+                            <span className="text-slate-400 text-[9px] block font-mono">
+                              (R1-R3 ยังอยู่ใน 5 Rank ย้อนหลัง)
+                            </span>
+                          )}
                           <span className="text-amber-300 font-bold text-[9.5px] block">
                             ออกแล้ว: {Math.max(modalNode.totalAutoIdCount, autoIdsList.length)} รหัส
                           </span>
@@ -7225,14 +7309,20 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
                         <div className="bg-slate-950/90 border border-rose-500/30 rounded p-1.5 text-center space-y-0.5">
                           <span className="text-slate-400 block">Extra ID Pool (รวมยอดเก่า)</span>
                           <span className="text-rose-400 font-extrabold text-xs block">
-                            {Number(
-                              modalNode.isExtraLineage
-                                ? 0
-                                : mainReport?.newExtraIdPool ?? modalNode.newExtraIdPool ?? 0
-                            ).toFixed(2)}{' '}
-                            U
+                            {effectiveExtraIdPool.toFixed(2)} U
                           </span>
-                          {!modalNode.isExtraLineage && (
+                          {isExtraOrCloneOfExtra ? (
+                            <span className="text-slate-400 text-[9px] block">Extra / โคลน Extra (ไม่มียอด)</span>
+                          ) : currentMaxR >= 27 ? (
+                            <span className="text-rose-300/80 text-[9px] block font-mono">
+                              รวม R4-R27 ทั้งหมด (Rank 27 สูงสุด)
+                            </span>
+                          ) : (
+                            <span className="text-rose-300/80 text-[9px] block font-mono">
+                              R4-R27 นอก Upgrade Pool + Extra
+                            </span>
+                          )}
+                          {!isExtraOrCloneOfExtra && (
                             <span className="text-amber-200 font-semibold text-[9px] block">
                               รวมยอดเก่าก่อนหัก:{' '}
                               {Number(
@@ -7846,12 +7936,17 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
                         <div className="space-y-1 border-t md:border-t-0 md:border-l border-slate-800 md:pl-2.5">
                           <span className="text-slate-400 block text-[10px]">💰 ยอดคงเหลือสุทธิปัจจุบัน:</span>
                           <span className="text-amber-400 font-extrabold text-sm block">
-                            {(mainReport?.vault35RemainingTotalUsdt ?? 0).toFixed(2)} USDT
+                            {Number(
+                              effectiveUpgradePool +
+                                effectiveAutoIdPool +
+                                effectiveExtraIdPool
+                            ).toFixed(2)}{' '}
+                            USDT
                           </span>
                           <div className="space-y-0.5 text-[10px] text-slate-300">
-                            <div>• Extra Pool: <strong className="text-rose-300">{Number(mainReport?.newExtraIdPool ?? 0).toFixed(2)} U</strong></div>
-                            <div>• Auto ID Pool: <strong className="text-amber-300">{Number(mainReport?.newAutoIdPool ?? 0).toFixed(2)} U</strong></div>
-                            <div>• Upgrade Pool: <strong className="text-indigo-300">{Number(mainReport?.upgradeRankPool ?? 0).toFixed(2)} U</strong></div>
+                            <div>• Extra Pool: <strong className="text-rose-300">{effectiveExtraIdPool.toFixed(2)} U</strong></div>
+                            <div>• Auto ID Pool: <strong className="text-amber-300">{effectiveAutoIdPool.toFixed(2)} U</strong></div>
+                            <div>• Upgrade Pool: <strong className="text-indigo-300">{effectiveUpgradePool.toFixed(2)} U</strong></div>
                           </div>
                         </div>
                       </div>

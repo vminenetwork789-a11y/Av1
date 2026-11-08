@@ -51,7 +51,8 @@ export function calculateMainIdVaultPools(
   mainId: number,
   currentRank: number,
   vaultByRank: Record<number, number> = {},
-  extraLeftVaultBonus: number = 0
+  extraLeftVaultBonus: number = 0,
+  isExtraOrCloneOfExtra: boolean = false
 ): MainIdVaultBreakdown {
   const safeRank = Math.max(1, Math.min(27, mainId === 1 ? 27 : (currentRank || 1)));
   const window5Start = Math.max(1, safeRank - 4);
@@ -63,42 +64,56 @@ export function calculateMainIdVaultPools(
   }
 
   // 1. Upgrade Rank Pool: ยอดสะสม Vault (35%) ของ 5 rank ย้อนหลัง
-  // (สถานะ rank ปัจจุบันของ idหลักนั้น ถอยหลัง 5 rank • หากอยู่ Rank 27 สูงสุดแล้ว Upgrade Pool = 0 เพราะยอดอยู่ใน Extra ID Pool ทั้งหมด)
+  // เงื่อนไข:
+  // - เฉพาะไอดี ที่ ไม่ใช่ EXTRA ID, โคลนนิ่ง ของ EXTRA ID (ถ้าเป็น Extra หรือ Clone ของ Extra ยอดจะเป็น 0)
+  // - rank < 27: รวมยอด UPGRADE_VAULT 5 Rank ย้อนหลัง
+  // - rank == 27: ไม่ต้องหายอดละเป็น 0
   let upgradeRankPool = 0;
-  if (safeRank < 27) {
+  if (!isExtraOrCloneOfExtra && safeRank < 27) {
     for (const r of window5Ranks) {
       upgradeRankPool += Number(vaultByRank[r] || 0);
     }
   }
 
-  // 2. New Auto ID Pool: ยอดสะสม Vault (35%) ใน Rank 1 ถึง 3 ลบด้วย 5 rank ย้อนหลังของรหัสหลักนั้น
-  // (เฉพาะ Rank 1..3 ที่หลุดพ้นจาก 5 rank ย้อนหลัง i.e. r < window5Start)
+  // 2. New Auto ID Pool:
+  // เงื่อนไข:
+  // - เฉพาะไอดีที่ "ไม่ใช่ EXTRA ID" และ "ไม่ใช่ โคลนนิ่งของ EXTRA ID"
+  // - กรณี rank <= 8: กรอบ 5 Rank ย้อนหลัง [currentRank - 4 ... currentRank] ลบด้วยยอดสะสม Rank 1-3 (คือเอาเฉพาะ Rank 1..3 ที่ r < window5Start)
+  // - กรณี rank >= 9: ยอดสะสม Rank 1-3 ทั้งหมด (เพราะหลุดกรอบ 5 Rank ย้อนหลังครบ 100%)
   let newAutoIdPool = 0;
-  for (let r = 1; r <= 3; r++) {
-    if (r < window5Start) {
-      newAutoIdPool += Number(vaultByRank[r] || 0);
-    }
-  }
-
-  // 3. New Extra ID Pool: ยอดสะสม Vault (35%) ใน Rank 4 ถึง 27 ที่หลุดพ้นกรอบ 5 rank ย้อนหลัง (หรือ Rank 4-27 ทั้งหมดเมื่ออยู่ Rank 27)
-  // โดยนำยอดเก่าคงเหลือสะสมจากทุกแรงค์ใน R4-R27 ที่หลุดกรอบ 5 แรงค์ + โบนัสเม็ดซ้าย Extra ID มารวมกันก่อนสร้าง Extra ID
-  // (หมายเหตุ: แยกกระปุกอิสระจาก New Auto ID Pool ใน Rank 1-3 ไม่นำยอด R1-R3 มานับซ้ำ)
-  let r4To27OutsideWindow = 0;
-  if (safeRank === 27) {
-    for (let r = 4; r <= 27; r++) {
-      r4To27OutsideWindow += Number(vaultByRank[r] || 0);
-    }
-  } else {
-    for (let r = 4; r <= 27; r++) {
-      if (r < window5Start) {
-        r4To27OutsideWindow += Number(vaultByRank[r] || 0);
+  if (!isExtraOrCloneOfExtra) {
+    for (let r = 1; r <= 3; r++) {
+      if (safeRank >= 9 || r < window5Start) {
+        newAutoIdPool += Number(vaultByRank[r] || 0);
       }
     }
   }
 
-  const safeExtraBonus = Math.max(0, Number(extraLeftVaultBonus || 0));
+  // 3. New Extra ID Pool:
+  // เงื่อนไข:
+  // 1. รายได้เกิดจากไอดี Extra ID (โบนัสเม็ดซ้าย Extra ID)
+  // 2. กรณี rank < 27: รวมยอดสะสม UPGRADE_VAULT (35%) ของ rank 4 ถึง 27 ลบด้วย Upgrade Pool (อยู่นอก 5 rank ย้อนหลัง)
+  //    กรณี rank == 27: รวมยอดสะสม UPGRADE_VAULT (35%) ของ rank 4 ถึง 27 ทั้งหมด
+  // - เฉพาะไอดีที่ ไม่ใช่ EXTRA ID และ ไม่ใช่ โคลนนิ่งของ EXTRA ID
+  let r4To27OutsideWindow = 0;
+  if (!isExtraOrCloneOfExtra) {
+    if (safeRank === 27) {
+      for (let r = 4; r <= 27; r++) {
+        r4To27OutsideWindow += Number(vaultByRank[r] || 0);
+      }
+    } else {
+      for (let r = 4; r <= 27; r++) {
+        if (r < window5Start || r > window5End) {
+          r4To27OutsideWindow += Number(vaultByRank[r] || 0);
+        }
+      }
+    }
+  }
+
+  const safeExtraBonus = isExtraOrCloneOfExtra ? 0 : Math.max(0, Number(extraLeftVaultBonus || 0));
   const hasExtraPoolEligibility =
-    safeRank === 27 || window5Start > 4 || r4To27OutsideWindow > 0 || safeExtraBonus > 0;
+    !isExtraOrCloneOfExtra &&
+    (safeRank === 27 || window5Start > 4 || r4To27OutsideWindow > 0 || safeExtraBonus > 0);
 
   const oldCarryoverVault = Number(
     (r4To27OutsideWindow + safeExtraBonus).toFixed(4)
