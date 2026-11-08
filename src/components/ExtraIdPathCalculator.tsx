@@ -346,9 +346,7 @@ export function calculateMatrixUpgradePath(
       }
     }
 
-    const deductedFromR4To27 = Math.max(0, Number((grossR4To27 - remR4To27).toFixed(4)));
-    const remainingCostForBonus = Math.max(0, Number((totalExtraCost - deductedFromR4To27).toFixed(4)));
-    const deductedFromBonus = Math.min(grossBonus, remainingCostForBonus);
+    const deductedFromBonus = Math.min(grossBonus, totalExtraCost);
     extraLeftBonusByMain.set(mId, Math.max(0, Number((grossBonus - deductedFromBonus).toFixed(4))));
   }
 
@@ -555,10 +553,12 @@ export function calculateMatrixUpgradePath(
       if (isParentExtraLineage) {
         const spMain = parentOriginNode.directSponsorNodeId > 0 ? parentOriginNode.directSponsorNodeId : 1;
         const vaultBonus = Number((price * 0.35).toFixed(4));
+        const prevBal = calcExtraIdPool(spMain);
         extraLeftBonusByMain.set(
           spMain,
           Number(((extraLeftBonusByMain.get(spMain) || 0) + vaultBonus).toFixed(4))
         );
+        const newBal = calcExtraIdPool(spMain);
         stepChainEvents.push({
           type: 'EXTRA_LEFT_BONUS',
           rank,
@@ -566,7 +566,7 @@ export function calculateMatrixUpgradePath(
           ownerMainId: spMain,
           parentId,
           side: 'LEFT',
-          descriptionTh: `เม็ดซ้ายของ Extra ID (R${rank}-#${parentId}) ส่ง Vault +${vaultBonus.toFixed(2)} U เข้ากระปุก Extra ID ของ Main #${spMain}`,
+          descriptionTh: `เม็ดซ้ายของ Extra ID (R${rank}-#${parentId}) ส่ง Vault +${vaultBonus.toFixed(2)} U เข้า Extra ID Pool ของ Main #${spMain} (ยอดกระปุก: ${prevBal.toFixed(2)} U → ${newBal.toFixed(2)} U)`,
         });
         checkAndSpawnExtraIds(stepUpgradeRank, spMain, stepExtraEvents, stepChainEvents, depth + 1);
         return;
@@ -1546,37 +1546,54 @@ export const ExtraIdPathCalculator: React.FC<ExtraIdPathCalculatorProps> = ({
                             <span className="text-slate-500 text-[11px]">ไม่เกิด Extra ID ในขั้นนี้</span>
                           ) : (
                             <div className="space-y-1.5">
-                              {step.extraIdsGenerated.map((ex, idx) => (
-                                <div
-                                  key={`step-${step.upgradeRank}-extra-${idx}`}
-                                  className="rounded-lg bg-slate-950/90 border border-fuchsia-500/40 p-2 space-y-0.5"
-                                >
-                                  <div className="flex items-center justify-between gap-2">
-                                    <span className="font-bold text-fuchsia-300">
-                                      ⚡ Main #{ex.ownerMainId} เกิด Extra ID ที่ Rank {ex.spawnedInRank}
-                                    </span>
-                                    <span className="text-rose-300 font-bold">-{ex.deductedUsdt.toFixed(2)} U</span>
+                              {step.extraIdsGenerated.map((ex, idx) => {
+                                const isSponsor = ex.ownerMainId === calculation.sponsorMainId;
+                                const finalPoolForOwner = isSponsor
+                                  ? step.sponsorExtraPoolFinalUsdt
+                                  : step.targetExtraPoolFinalUsdt;
+                                const allOwnerIndices = step.extraIdsGenerated
+                                  .map((e, i) => (e.ownerMainId === ex.ownerMainId ? i : -1))
+                                  .filter((i) => i >= 0);
+                                const isLastExtraForOwner = idx === allOwnerIndices[allOwnerIndices.length - 1];
+                                const subsequentGains = Number((finalPoolForOwner - ex.poolAfterUsdt).toFixed(2));
+
+                                return (
+                                  <div
+                                    key={`step-${step.upgradeRank}-extra-${idx}`}
+                                    className="rounded-lg bg-slate-950/90 border border-fuchsia-500/40 p-2 space-y-0.5"
+                                  >
+                                    <div className="flex items-center justify-between gap-2">
+                                      <span className="font-bold text-fuchsia-300">
+                                        ⚡ Main #{ex.ownerMainId} เกิด Extra ID ที่ Rank {ex.spawnedInRank}
+                                      </span>
+                                      <span className="text-rose-300 font-bold">-{ex.deductedUsdt.toFixed(2)} U</span>
+                                    </div>
+                                    <div className="text-[11px] text-slate-300">
+                                      โหนดใหม่:{' '}
+                                      <strong className="text-white">
+                                        R{ex.spawnedInRank}-#{ex.newNodeId}
+                                      </strong>{' '}
+                                      วางใต้{' '}
+                                      <button
+                                        type="button"
+                                        onClick={() => onSelectRankAndNode?.(ex.spawnedInRank, ex.parentId)}
+                                        className="text-indigo-300 hover:underline font-bold cursor-pointer"
+                                      >
+                                        R{ex.spawnedInRank}-#{ex.parentId}
+                                      </button>{' '}
+                                      ({ex.side === 'LEFT' ? '↙ซ้าย' : '↘ขวา'})
+                                    </div>
+                                    <div className="text-[10px] text-slate-400">
+                                      {ex.triggeredByNote} → คงเหลือขณะนั้น {ex.poolAfterUsdt.toFixed(2)} U
+                                      {isLastExtraForOwner && Math.abs(subsequentGains) > 0.001 && (
+                                        <div className="text-emerald-300 font-bold mt-0.5">
+                                          ↳ จบขั้นนี้: {subsequentGains > 0 ? '+' : ''}{subsequentGains.toFixed(2)} U จากปฏิกิริยาโคลนตกซ้าย → ยอดสุทธิ {finalPoolForOwner.toFixed(2)} U
+                                        </div>
+                                      )}
+                                    </div>
                                   </div>
-                                  <div className="text-[11px] text-slate-300">
-                                    โหนดใหม่:{' '}
-                                    <strong className="text-white">
-                                      R{ex.spawnedInRank}-#{ex.newNodeId}
-                                    </strong>{' '}
-                                    วางใต้{' '}
-                                    <button
-                                      type="button"
-                                      onClick={() => onSelectRankAndNode?.(ex.spawnedInRank, ex.parentId)}
-                                      className="text-indigo-300 hover:underline font-bold cursor-pointer"
-                                    >
-                                      R{ex.spawnedInRank}-#{ex.parentId}
-                                    </button>{' '}
-                                    ({ex.side === 'LEFT' ? '↙ซ้าย' : '↘ขวา'})
-                                  </div>
-                                  <div className="text-[10px] text-slate-400">
-                                    {ex.triggeredByNote} → คงเหลือ {ex.poolAfterUsdt.toFixed(2)} U
-                                  </div>
-                                </div>
-                              ))}
+                                );
+                              })}
                             </div>
                           )}
                         </td>
