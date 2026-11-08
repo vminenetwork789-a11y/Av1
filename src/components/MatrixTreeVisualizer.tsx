@@ -2779,8 +2779,10 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
           if (typeof repExtraBonus === 'number') {
             remainingExtraLeftBonus = repExtraBonus;
           } else {
-            // Smart Contract & Database rules: Extra ID costs are absorbed by extraLeftVaultBonus FIRST!
-            const deductedFromExtraLeftBonus = Math.min(extraLeftVaultBonusGross, totalExtraCostForMain);
+            // หักต้นทุนสร้าง Extra ID ที่ถูกตัดไปแล้วจาก R4..R27 บนเชนก่อน ส่วนที่เหลือจึงหักออกจากโบนัสเม็ดซ้ายของ Extra ID
+            const deductedFromR4To27 = Math.max(0, Number((totalGross4To27 - totalRem4To27).toFixed(4)));
+            const remExtraCostForBonus = Math.max(0, Number((totalExtraCostForMain - deductedFromR4To27).toFixed(4)));
+            const deductedFromExtraLeftBonus = Math.min(extraLeftVaultBonusGross, remExtraCostForBonus);
             remainingExtraLeftBonus = Math.max(
               0,
               Number((extraLeftVaultBonusGross - deductedFromExtraLeftBonus).toFixed(4))
@@ -7018,15 +7020,33 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
             }
           }
         }
-        const extraBonusNet = Number(mainReport?.extraLeftVaultBonus ?? 0);
-        const extraBonusGross = Number(mainReport?.extraLeftVaultBonusGross ?? extraBonusNet);
+        const extraInflowFromHistory = vaultHistory
+          .filter((h: any) => String(h?.note || '').includes('Extra R'))
+          .reduce((s: number, h: any) => s + Number(h?.amountUsdt || 0), 0);
+        const extraBonusGross = Number(
+          Math.max(
+            Number(mainReport?.extraLeftVaultBonusGross ?? 0),
+            extraInflowFromHistory
+          ).toFixed(2)
+        );
+        const extraBonusNet = Number(
+          (typeof mainReport?.extraLeftVaultBonus === 'number'
+            ? mainReport.extraLeftVaultBonus
+            : Math.max(0, extraBonusGross - extraIdsUsed)
+          ).toFixed(2)
+        );
 
         let effectiveExtraIdPool = 0;
         if (!isExtraOrCloneOfExtra) {
+          const sumFromRankAndExtraBonus = Number((calculatedExtraNet + extraBonusNet).toFixed(2));
           if (typeof mainReport?.newExtraIdPool === 'number') {
-            effectiveExtraIdPool = Math.max(0, Number(mainReport.newExtraIdPool.toFixed(2)));
-          } else if (calculatedExtraNet > 0 && calculatedExtraNet < calculatedExtraGross) {
-            effectiveExtraIdPool = Math.max(0, Number((calculatedExtraNet + extraBonusNet).toFixed(2)));
+            effectiveExtraIdPool = Math.max(
+              0,
+              Number(mainReport.newExtraIdPool.toFixed(2)),
+              sumFromRankAndExtraBonus
+            );
+          } else if (rankNodesList && rankNodesList.length > 0) {
+            effectiveExtraIdPool = Math.max(0, sumFromRankAndExtraBonus);
           } else {
             effectiveExtraIdPool = Math.max(0, Number((calculatedExtraGross + extraBonusGross - extraIdsUsed).toFixed(2)));
           }
@@ -7405,11 +7425,16 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
                             <span className="text-slate-400 text-[9px] block">Extra / โคลน Extra (ไม่มียอด)</span>
                           ) : currentMaxR >= 27 ? (
                             <span className="text-rose-300/80 text-[9px] block font-mono">
-                              รวม R4-R27 ทั้งหมด (Rank 27 สูงสุด)
+                              1) รายได้ Extra ID + 2) R4-R27 (Rank 27)
                             </span>
                           ) : (
                             <span className="text-rose-300/80 text-[9px] block font-mono">
-                              R4-R27 นอก Upgrade Pool + Extra
+                              1) รายได้ Extra ID + 2) R4-R27 นอกกรอบ
+                            </span>
+                          )}
+                          {!isExtraOrCloneOfExtra && (extraBonusGross > 0 || extraBonusNet > 0 || calculatedExtraNet > 0) && (
+                            <span className="text-cyan-300 font-semibold text-[8.5px] block font-mono">
+                              Extra ID: {extraBonusNet.toFixed(2)} U (สะสม +{extraBonusGross.toFixed(2)} U) • R4-27: {calculatedExtraNet.toFixed(2)} U
                             </span>
                           )}
                           {!isExtraOrCloneOfExtra && (

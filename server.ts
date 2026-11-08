@@ -522,6 +522,7 @@ const MATRIX_READ_ABI = [
   'function nodeCloneRound(uint8, uint256) external view returns (uint256)',
   'function nodeDirectSponsorNodeId(uint8, uint256) external view returns (uint256)',
   'function nodeUpgradeVault(uint8, uint256) external view returns (uint256)',
+  'function mainIdExtraPoolBonus(uint256) external view returns (uint256)',
   'function getMainIdCurrentRank(uint256) external view returns (uint8)',
   'function getMainIdNodeInRank(uint256, uint8) external view returns (uint256)',
   'function getMainIdThreePools(address, uint256) external view returns (uint8 currentRank, uint8 window5Start, uint8 window5End, uint256 upgradeRankPool, uint256 newAutoIdPool, uint256 newExtraIdPool)',
@@ -677,6 +678,7 @@ export interface IndexedTreeNode {
   nodeVault: number;
   rawNodeVault: number;
   reconciledBaseVault?: number;
+  extraPoolBonusOnChain?: number;
   isLocalUpgrade?: boolean;
   originType?: 'MANUAL_REGISTER' | 'AUTO_MAIN' | 'AUTO_NEW_MAIN' | 'AUTO_EXTRA' | 'CLONE';
   createdAt?: string;
@@ -4068,12 +4070,13 @@ async function startApp() {
     let retries = 3;
     while (retries >= 0) {
       try {
-        const [raw, origBn, roundBn, sponsorNodeBn, vaultBn] = await Promise.all([
+        const [raw, origBn, roundBn, sponsorNodeBn, vaultBn, extraBonusBn] = await Promise.all([
           contract.rankNodes(rankNum, nodeId),
           contract.nodeOriginMainId(rankNum, nodeId).catch(() => 0n),
           contract.nodeCloneRound(rankNum, nodeId).catch(() => 0n),
           contract.nodeDirectSponsorNodeId(rankNum, nodeId).catch(() => 0n),
           contract.nodeUpgradeVault(rankNum, nodeId).catch(() => 0n),
+          rankNum === 1 ? contract.mainIdExtraPoolBonus(nodeId).catch(() => null) : Promise.resolve(null),
         ]);
 
         const id = Number(raw.id ?? raw[0] ?? 0);
@@ -4083,6 +4086,11 @@ async function startApp() {
           const isClone = Boolean(raw.isClone ?? raw[6] ?? false);
           const isExtraId =
             Boolean(raw.isExtraId ?? raw[7] ?? false) && !isClone;
+          let extraPoolBonusOnChain: number | undefined = undefined;
+          if (rankNum === 1 && extraBonusBn !== null && !isClone && !isExtraId) {
+            const bDec = extraBonusBn >= 100000000000000n ? 18 : (activeUsdtDecimals || 18);
+            extraPoolBonusOnChain = Number(ethers.formatUnits(extraBonusBn, bDec));
+          }
           let originType: IndexedTreeNode['originType'] = 'MANUAL_REGISTER';
           if (isClone) originType = 'CLONE';
           else if (isExtraId) originType = 'AUTO_EXTRA';
@@ -4103,6 +4111,7 @@ async function startApp() {
             nodeVault: rawVaultVal,
             rawNodeVault: rawVaultVal,
             reconciledBaseVault: rawVaultVal,
+            extraPoolBonusOnChain,
             originType,
             createdAt: new Date().toISOString(),
           } as IndexedTreeNode;
@@ -4198,12 +4207,19 @@ async function startApp() {
             await Promise.all(
               mainNodesToRefresh.map(async (mNode) => {
                 try {
-                  const rawV = await contract.nodeUpgradeVault(rankNum, mNode.id);
+                  const [rawV, rawExtraB] = await Promise.all([
+                    contract.nodeUpgradeVault(rankNum, mNode.id),
+                    rankNum === 1 ? contract.mainIdExtraPoolBonus(mNode.id).catch(() => null) : Promise.resolve(null),
+                  ]);
                   const dec = rawV >= 100000000000000n ? 18 : (activeUsdtDecimals || 18);
                   const val = Number(ethers.formatUnits(rawV, dec));
                   mNode.rawNodeVault = val;
                   mNode.nodeVault = val;
                   mNode.reconciledBaseVault = val;
+                  if (rankNum === 1 && rawExtraB !== null) {
+                    const bDec = rawExtraB >= 100000000000000n ? 18 : (activeUsdtDecimals || 18);
+                    mNode.extraPoolBonusOnChain = Number(ethers.formatUnits(rawExtraB, bDec));
+                  }
                 } catch {
                   // Ignore transient RPC error
                 }
@@ -4664,15 +4680,48 @@ async function startApp() {
       }
     }
 
-    // Smart Contract rules (_deductExtraPool): Extra ID costs are absorbed by extraLeftVaultBonus FIRST!
+    const upgradeHistory = (matrixDB.upgradeLogs || []).filter(
+      (u) => Number(u.mainNodeId) === mainIdNum
+    );
+    const upgradeDeductedTotalUsdt = Number(
+      upgradeHistory.reduce((s, u) => s + (Number(u.vaultDeductedUsdt) || 0), 0).toFixed(4)
+    );
+    const upgradeDeductedInR4To27 = Number(
+      upgradeHistory
+        .filter((u) => Number(u.fromRank) >= 4)
+        .reduce((s, u) => s + (Number(u.vaultDeductedUsdt) || 0), 0)
+        .toFixed(4)
+    );
+
+    // คำนวณยอดคงเหลือของรายได้จากไอดี Extra ID (extraLeftVaultBonus):
+    // ยอด R4..R27 บนเชน (r4To27OutsideWindow) ได้ถูกหักต้นทุนสร้าง Extra ID ไปแล้วบางส่วน (extraDeductedFromR4To27)
+    // ส่วนที่เหลือของต้นทุน Extra ID (remainingExtraCostForBonus) จึงถูกหักออกจาก extraLeftVaultBonusGross
+    const totalDeductedFromR4To27 = Math.max(
+      0,
+      Number((grossR4To27OutsideWindow - r4To27OutsideWindow).toFixed(4))
+    );
+    const extraDeductedFromR4To27 = Math.min(
+      extraIdDeductedTotalUsdt,
+      Math.max(0, Number((totalDeductedFromR4To27 - upgradeDeductedInR4To27).toFixed(4)))
+    );
+    const remainingExtraCostForBonus = Math.max(
+      0,
+      Number((extraIdDeductedTotalUsdt - extraDeductedFromR4To27).toFixed(4))
+    );
     const deductedFromExtraLeftBonus = Math.min(
       extraLeftVaultBonusGross,
-      extraIdDeductedTotalUsdt
+      remainingExtraCostForBonus
     );
-    const extraLeftVaultBonus = Math.max(
+    const computedExtraLeftVaultBonus = Math.max(
       0,
       Number((extraLeftVaultBonusGross - deductedFromExtraLeftBonus).toFixed(4))
     );
+    const extraLeftVaultBonus =
+      !isExtraOrCloneOfExtra && typeof targetNode?.extraPoolBonusOnChain === 'number'
+        ? Math.max(computedExtraLeftVaultBonus, Number(targetNode.extraPoolBonusOnChain.toFixed(4)))
+        : isExtraOrCloneOfExtra
+        ? 0
+        : computedExtraLeftVaultBonus;
 
     const autoMainSourceMap = reconcileRank1AutoMainIds();
     const spawnedAutoIdsList: number[] = [];
@@ -4682,19 +4731,43 @@ async function startApp() {
       }
     }
 
-    // หักยอดที่นำไปใช้สร้าง Auto ID (5.00 USDT / รหัส)
+    // หักยอดที่นำไปใช้สร้าง Auto ID (5.00 USDT / รหัส) เฉพาะกรณีที่ vaultsByRank[1..3] ยังไม่ได้หักบนเชน
     const autoIdsUsedUsdt = Number((spawnedAutoIdsList.length * 5.0).toFixed(4));
-    let netAutoIdPool = newAutoIdPool;
-    if (netAutoIdPool >= autoIdsUsedUsdt && autoIdsUsedUsdt > 0) {
-      netAutoIdPool = Number((netAutoIdPool - autoIdsUsedUsdt).toFixed(4));
+    let grossR1To3OutsideWindow = 0;
+    for (let r = 1; r <= 3; r++) {
+      if (currentRank >= 9 || r < window5Start) {
+        const rNodes = matrixDB.nodesByRank[r] || [];
+        const correspNode =
+          r === 1
+            ? targetNode
+            : rNodes.find((n) => !n.isClone && !n.isExtraId && n.originMainId === mainIdNum);
+        if (correspNode) {
+          const rUnitVault = Number(((RANK_PRICES_USDT[r - 1] || 5) * 0.35).toFixed(4));
+          let leftCountInR = 0;
+          for (const rn of rNodes) {
+            const isSameMain =
+              rn.id === correspNode.id ||
+              (rn.isClone && (rn.originMainId === correspNode.id || rn.originMainId === mainIdNum));
+            if (isSameMain && rn.leftChild > 0) {
+              leftCountInR++;
+            }
+          }
+          grossR1To3OutsideWindow = Number(
+            (grossR1To3OutsideWindow + leftCountInR * rUnitVault).toFixed(4)
+          );
+        }
+      }
     }
+    const alreadyDeductedInR1To3 = Math.max(0, Number((grossR1To3OutsideWindow - newAutoIdPool).toFixed(4)));
+    const unappliedAutoDeduct = Math.max(0, Number((autoIdsUsedUsdt - alreadyDeductedInR1To3).toFixed(4)));
+    const netAutoIdPool = Math.max(0, Number((newAutoIdPool - unappliedAutoDeduct).toFixed(4)));
 
-    // หักยอดที่นำไปใช้สร้าง Extra ID (หักโบนัสเม็ดซ้ายก่อน แล้วหักยอด R4-R27 ที่เหลือ)
-    const remExtraDeduction = Math.max(0, Number((extraIdDeductedTotalUsdt - deductedFromExtraLeftBonus).toFixed(4)));
-    let netR4To27 = r4To27OutsideWindow;
-    if (netR4To27 >= remExtraDeduction && remExtraDeduction > 0) {
-      netR4To27 = Number((netR4To27 - remExtraDeduction).toFixed(4));
-    }
+    // หักยอดที่นำไปใช้สร้าง Extra ID เฉพาะกรณีที่ r4To27OutsideWindow ยังไม่ได้หักบนเชน
+    const unappliedExtraDeduct = Math.max(
+      0,
+      Number((extraIdDeductedTotalUsdt - deductedFromExtraLeftBonus - extraDeductedFromR4To27).toFixed(4))
+    );
+    const netR4To27 = Math.max(0, Number((r4To27OutsideWindow - unappliedExtraDeduct).toFixed(4)));
 
     const oldCarryoverVault = Number(
       (netR4To27 + extraLeftVaultBonus).toFixed(4)
@@ -4709,16 +4782,7 @@ async function startApp() {
       ).toFixed(4)
     );
     const r1To3LeftoverOldVault = 0;
-    const upgradeHistory = (matrixDB.upgradeLogs || []).filter(
-      (u) => Number(u.mainNodeId) === mainIdNum
-    );
-    const upgradeDeductedTotalUsdt = Number(
-      upgradeHistory.reduce((s, u) => s + (Number(u.vaultDeductedUsdt) || 0), 0).toFixed(4)
-    );
-    let netUpgradeRankPool = upgradeRankPool;
-    if (netUpgradeRankPool >= upgradeDeductedTotalUsdt && upgradeDeductedTotalUsdt > 0) {
-      netUpgradeRankPool = Number((netUpgradeRankPool - upgradeDeductedTotalUsdt).toFixed(4));
-    }
+    const netUpgradeRankPool = Math.max(0, Number(upgradeRankPool.toFixed(4)));
 
     return {
       mainId: mainIdNum,
@@ -4993,6 +5057,7 @@ async function startApp() {
         r1To3LeftoverOldVault: number;
         r4To27OutsideWindowVault: number;
         extraLeftVaultBonus: number;
+        extraLeftVaultBonusGross: number;
         extraIdDeductedTotalUsdt: number;
         newExtraIdPoolGross: number;
         pools: {
@@ -5085,6 +5150,7 @@ async function startApp() {
               r1To3LeftoverOldVault: 0,
               r4To27OutsideWindowVault: 0,
               extraLeftVaultBonus: 0,
+              extraLeftVaultBonusGross: 0,
               extraIdDeductedTotalUsdt: 0,
               newExtraIdPoolGross: 0,
             };
@@ -5239,6 +5305,7 @@ async function startApp() {
           r1To3LeftoverOldVault: stats.r1To3LeftoverOldVault,
           r4To27OutsideWindowVault: stats.r4To27OutsideWindowVault,
           extraLeftVaultBonus: stats.extraLeftVaultBonus,
+          extraLeftVaultBonusGross: stats.extraLeftVaultBonusGross,
           extraIdDeductedTotalUsdt: stats.extraIdDeductedTotalUsdt,
           newExtraIdPoolGross: stats.newExtraIdPoolGross,
           pools: {
@@ -5878,10 +5945,18 @@ async function startApp() {
         rep.upgradeRankPool = stats.upgradeRankPool;
         rep.newAutoIdPool = stats.newAutoIdPool;
         rep.newExtraIdPool = stats.newExtraIdPool;
+        rep.oldCarryoverVault = stats.oldCarryoverVault;
+        rep.r4To27OutsideWindowVault = stats.r4To27OutsideWindowVault;
+        rep.extraLeftVaultBonus = stats.extraLeftVaultBonus;
+        rep.extraLeftVaultBonusGross = stats.extraLeftVaultBonusGross;
+        rep.extraIdDeductedTotalUsdt = stats.extraIdDeductedTotalUsdt;
+        rep.newExtraIdPoolGross = stats.newExtraIdPoolGross;
         if (rep.pools) {
           rep.pools.upgradeRankPool = stats.upgradeRankPool;
           rep.pools.newAutoIdPool = stats.newAutoIdPool;
           rep.pools.newExtraIdPool = stats.newExtraIdPool;
+          rep.pools.oldCarryoverVault = stats.oldCarryoverVault;
+          rep.pools.newExtraIdPoolGross = stats.newExtraIdPoolGross;
         }
 
         const rem = Number(
