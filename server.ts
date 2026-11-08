@@ -5772,16 +5772,6 @@ async function startApp() {
 
       // Compute remaining & deducted Vault + finalize levelSummary (clonesLevelTotalUsdt & combinedLevelTotalUsdt) for each ID
       for (const rep of reportsMap.values()) {
-        const stats = computeMainIdDatabaseStats(rep.id);
-        const rem = rep.rankNodesList.reduce((acc, rItem) => acc + Number(rItem.nodeVault || 0), 0);
-        rep.vault35RemainingTotalUsdt = Number(rem.toFixed(2));
-        rep.vault35GrossTotalUsdt = Number(
-          rep.vault35History.reduce((s, h) => s + (Number(h.amountUsdt) || 0), 0).toFixed(2)
-        );
-        rep.vault35DeductedTotalUsdt = Number(
-          Math.max(0, rep.vault35GrossTotalUsdt - rep.vault35RemainingTotalUsdt).toFixed(2)
-        );
-
         if (!rep.isClone) {
           const cloneLvlSum = Number(
             Math.max(0, rep.level30TotalUsdt - rep.levelSummary.thisNodeLevelTotalUsdt).toFixed(2)
@@ -5792,6 +5782,81 @@ async function startApp() {
           rep.levelSummary.clonesLevelTotalUsdt = 0;
           rep.levelSummary.combinedLevelTotalUsdt = Number(rep.levelSummary.thisNodeLevelTotalUsdt.toFixed(2));
         }
+
+        if (rep.isClone) {
+          rep.vault35GrossTotalUsdt = Number(
+            rep.vault35History.reduce((s, h) => s + (Number(h.amountUsdt) || 0), 0).toFixed(2)
+          );
+          rep.vault35RemainingTotalUsdt = 0;
+          rep.vault35DeductedTotalUsdt = rep.vault35GrossTotalUsdt;
+          rep.vaultDeductedBreakdown = {
+            extraIdsTotalUsdt: 0,
+            autoIdsTotalUsdt: 0,
+            upgradesTotalUsdt: rep.vault35DeductedTotalUsdt,
+          };
+          const cloneLedger: VaultLedgerItem[] = [];
+          const chronoCloneInflows = [...rep.vault35History].sort(
+            (a, b) => a.rank - b.rank || a.fromNodeId - b.fromNodeId
+          );
+          for (const inf of chronoCloneInflows) {
+            const amt = Number(Number(inf.amountUsdt || 0).toFixed(2));
+            cloneLedger.push({
+              id: `v-in-clone-${rep.id}-${cloneLedger.length + 1}`,
+              timestamp: inf.timestamp,
+              direction: 'IN',
+              actionType: 'RECEIVE_VAULT',
+              actionLabelTh: `รับ 35% Vault (โคลน R${inf.rank}-#${rep.id})`,
+              rank: inf.rank,
+              amountUsdt: amt,
+              poolType: 'UPGRADE_POOL',
+              poolLabelTh: `โอนเข้า Main #${rep.originMainId}`,
+              descriptionTh: `รับ 35% Vault (+${amt.toFixed(2)} USDT) จากเม็ดซ้าย #${inf.fromNodeId} ใต้โคลน #${rep.id}`,
+              note: inf.note,
+              poolBalanceAfterUsdt: amt,
+              balanceAfterUsdt: amt,
+            });
+            cloneLedger.push({
+              id: `v-out-clone-${rep.id}-${cloneLedger.length + 1}`,
+              timestamp: inf.timestamp,
+              direction: 'OUT',
+              actionType: 'AUTO_UPGRADE',
+              actionLabelTh: `โอนเข้ากระปุกรหัสหลัก Main #${rep.originMainId}`,
+              rank: inf.rank,
+              amountUsdt: amt,
+              poolType: 'UPGRADE_POOL',
+              poolLabelTh: `Main #${rep.originMainId} Vault`,
+              descriptionTh: `โอนยอด 35% Vault (-${amt.toFixed(2)} USDT) จากโคลน #${rep.id} เข้ากระปุกรหัสหลัก Main #${rep.originMainId} ทันที`,
+              note: `โอนเข้ากระปุก Main #${rep.originMainId}`,
+              poolBalanceAfterUsdt: 0,
+              balanceAfterUsdt: 0,
+            });
+          }
+          rep.vault35Ledger = cloneLedger.reverse();
+          continue;
+        }
+
+        const stats = computeMainIdDatabaseStats(rep.id);
+
+        // Align 3 pools with stats first so remaining balance is 100% identical to the sum of the 3 active pools
+        rep.upgradeRankPool = stats.upgradeRankPool;
+        rep.newAutoIdPool = stats.newAutoIdPool;
+        rep.newExtraIdPool = stats.newExtraIdPool;
+        if (rep.pools) {
+          rep.pools.upgradeRankPool = stats.upgradeRankPool;
+          rep.pools.newAutoIdPool = stats.newAutoIdPool;
+          rep.pools.newExtraIdPool = stats.newExtraIdPool;
+        }
+
+        const rem = Number(
+          (stats.upgradeRankPool + stats.newAutoIdPool + stats.newExtraIdPool).toFixed(2)
+        );
+        rep.vault35RemainingTotalUsdt = rem;
+        rep.vault35GrossTotalUsdt = Number(
+          rep.vault35History.reduce((s, h) => s + (Number(h.amountUsdt) || 0), 0).toFixed(2)
+        );
+        rep.vault35DeductedTotalUsdt = Number(
+          Math.max(0, rep.vault35GrossTotalUsdt - rep.vault35RemainingTotalUsdt).toFixed(2)
+        );
 
         // Deductions breakdown: 100% mathematically balanced to vault35DeductedTotalUsdt
         const extraDeduct = Number(
@@ -5811,186 +5876,286 @@ async function startApp() {
           upgradesTotalUsdt: upDeduct,
         };
 
-        // Align 3 pools with stats
-        rep.upgradeRankPool = stats.upgradeRankPool;
-        rep.newAutoIdPool = stats.newAutoIdPool;
-        rep.newExtraIdPool = stats.newExtraIdPool;
-        if (rep.pools) {
-          rep.pools.upgradeRankPool = stats.upgradeRankPool;
-          rep.pools.newAutoIdPool = stats.newAutoIdPool;
-          rep.pools.newExtraIdPool = stats.newExtraIdPool;
+        // Build 35% Vault Audit Ledger (Exact Causal Inflow vs Outflow & Per-Pool Running Balance)
+        const ledgerEvents: VaultLedgerItem[] = [];
+        const allChronoInflows = [...rep.vault35History].sort(
+          (a, b) => a.rank - b.rank || a.fromNodeId - b.fromNodeId
+        );
+        const autoOutQueue = [...rep.autoIdsSpawned].sort((a, b) => a.id - b.id);
+        const extraOutQueue = [...rep.autoExtraIdsSpawned].sort(
+          (a, b) => a.rank - b.rank || a.id - b.id
+        );
+
+        const isExtraLeftBonusInflow = (inf: CommissionItem) =>
+          (inf.note || '').includes('Extra R') ||
+          (inf.note || '').includes('Extra Left Bonus') ||
+          (inf.note || '').includes('ส่งเข้า New Extra ID Pool');
+
+        const regularInflowsByRank = new Map<number, CommissionItem[]>();
+        const pendingExtraLeftInflows: CommissionItem[] = [];
+
+        for (const inf of allChronoInflows) {
+          if (isExtraLeftBonusInflow(inf)) {
+            pendingExtraLeftInflows.push(inf);
+          } else {
+            const list = regularInflowsByRank.get(inf.rank) || [];
+            list.push(inf);
+            regularInflowsByRank.set(inf.rank, list);
+          }
         }
 
-        // Build 35% Vault Audit Ledger (Inflow vs Outflow & Running Balance)
-        const ledgerEvents: VaultLedgerItem[] = [];
-        const sortedInflows = rep.vault35History.slice().reverse();
-        const sortedAutoSpawned = rep.autoIdsSpawned.slice().reverse();
-        const sortedExtraSpawned = rep.autoExtraIdsSpawned.slice().reverse();
+        let runningUpgradePool = 0;
+        let runningAutoPool = 0;
+        let runningExtraPool = 0;
+        let netRunningTotal = 0;
 
-        // 1. Inflow Events
-        for (const inf of sortedInflows) {
-          const isExtraLeftBonus =
-            (inf.note || '').includes('Extra R') ||
-            (inf.note || '').includes('Extra Left Bonus') ||
-            (inf.note || '').includes('ส่งเข้า New Extra ID Pool');
+        let remAutoDeductToAlloc = autoDeduct;
+        const extraLeftBonusUsed = Math.max(
+          0,
+          Number(((stats.extraLeftVaultBonusGross || 0) - (stats.extraLeftVaultBonus || 0)).toFixed(2))
+        );
+        let remExtraRegDeductToAlloc = Math.max(
+          0,
+          Number((extraDeduct - extraLeftBonusUsed).toFixed(2))
+        );
+        let remUpDeductToAlloc = upDeduct;
 
-          let pType: 'UPGRADE_POOL' | 'AUTO_ID_POOL' | 'EXTRA_ID_POOL';
-          let pLabel: string;
-
-          if (isExtraLeftBonus) {
-            pType = 'EXTRA_ID_POOL';
-            pLabel = 'Extra ID Pool';
-          } else if ((rep.currentMaxRank || 1) >= 27) {
-            if (inf.rank <= 3 && inf.rank < stats.window5Start) {
-              pType = 'AUTO_ID_POOL';
-              pLabel = 'Auto ID Pool';
-            } else {
-              pType = 'EXTRA_ID_POOL';
-              pLabel = 'Extra ID Pool';
-            }
-          } else {
-            if (inf.rank >= stats.window5Start && inf.rank <= stats.window5End) {
-              pType = 'UPGRADE_POOL';
-              pLabel = 'Upgrade Pool';
-            } else if (inf.rank <= 3 && inf.rank < stats.window5Start) {
-              pType = 'AUTO_ID_POOL';
-              pLabel = 'Auto ID Pool';
-            } else {
-              pType = 'EXTRA_ID_POOL';
-              pLabel = 'Extra ID Pool';
-            }
+        const flushAutoOutQueue = (refTimestamp: string) => {
+          while (autoOutQueue.length > 0 && runningAutoPool + 1e-4 >= 5.0) {
+            const sp = autoOutQueue.shift()!;
+            const cost = 5.0;
+            runningAutoPool = Number(Math.max(0, runningAutoPool - cost).toFixed(2));
+            netRunningTotal = Number(Math.max(0, netRunningTotal - cost).toFixed(2));
+            ledgerEvents.push({
+              id: `v-out-auto-${rep.id}-${sp.id}`,
+              timestamp: refTimestamp || sp.timestamp,
+              direction: 'OUT',
+              actionType: 'SPAWN_AUTO_ID',
+              actionLabelTh: `หักสร้าง ${sp.label}`,
+              rank: 1,
+              amountUsdt: cost,
+              poolType: 'AUTO_ID_POOL',
+              poolLabelTh: 'Auto ID Pool',
+              descriptionTh: `หัก 5.00 USDT จาก Auto ID Pool สร้าง ${sp.label} (วางใต้ R1-#${sp.parentId} ฝั่ง${sp.side === 'LEFT' ? 'ซ้าย' : 'ขวา'})`,
+              note: `สร้าง ${sp.label} สำเร็จ`,
+              poolBalanceAfterUsdt: runningAutoPool,
+              balanceAfterUsdt: netRunningTotal,
+            });
           }
+        };
 
+        const processExtraLeftBonusInflow = (inf: CommissionItem, fallbackTime?: string) => {
+          const amt = Number(Number(inf.amountUsdt || 0).toFixed(2));
+          const evTime = fallbackTime && new Date(fallbackTime).getTime() > new Date(inf.timestamp).getTime()
+            ? fallbackTime
+            : inf.timestamp;
+          runningExtraPool = Number((runningExtraPool + amt).toFixed(2));
+          netRunningTotal = Number((netRunningTotal + amt).toFixed(2));
           ledgerEvents.push({
             id: `v-in-${rep.id}-${ledgerEvents.length + 1}`,
-            timestamp: inf.timestamp,
+            timestamp: evTime,
             direction: 'IN',
             actionType: 'RECEIVE_VAULT',
-            actionLabelTh: `รับ 35% Vault (Rank ${inf.rank})`,
+            actionLabelTh: `รับ 35% Vault จาก Extra ID (Rank ${inf.rank})`,
             rank: inf.rank,
-            amountUsdt: inf.amountUsdt,
-            poolType: pType,
-            poolLabelTh: pLabel,
-            descriptionTh: `รับ 35% Vault (+${inf.amountUsdt.toFixed(2)} USDT) จากเม็ดซ้ายใน Rank ${inf.rank} สะสมเข้า ${pLabel}`,
-            note: inf.note,
-            poolBalanceAfterUsdt: 0,
-            balanceAfterUsdt: 0,
-          });
-        }
-
-        // 2. Outflow Events: Auto IDs
-        sortedAutoSpawned.forEach((sp, idx) => {
-          const spTime = sp.timestamp || new Date(Date.now() - (idx + 1) * 60000).toISOString();
-          ledgerEvents.push({
-            id: `v-out-auto-${rep.id}-${sp.id}`,
-            timestamp: spTime,
-            direction: 'OUT',
-            actionType: 'SPAWN_AUTO_ID',
-            actionLabelTh: 'หักสร้าง Auto ID',
-            rank: 1,
-            amountUsdt: 5.0,
-            poolType: 'AUTO_ID_POOL',
-            poolLabelTh: 'Auto ID Pool',
-            descriptionTh: `หัก 5.00 USDT จาก Auto ID Pool สร้าง ${sp.label} วางผัง Rank 1`,
-            note: `สร้าง Auto ID สำเร็จ (ID #${sp.id})`,
-            poolBalanceAfterUsdt: 0,
-            balanceAfterUsdt: 0,
-          });
-        });
-
-        // 3. Outflow Events: Extra IDs
-        sortedExtraSpawned.forEach((sp, idx) => {
-          const cost = RANK_PRICES_USDT[sp.rank - 1] || 10;
-          const spTime = sp.timestamp || new Date(Date.now() - (idx + 1) * 50000).toISOString();
-          ledgerEvents.push({
-            id: `v-out-extra-${rep.id}-${sp.rank}-${sp.id}`,
-            timestamp: spTime,
-            direction: 'OUT',
-            actionType: 'SPAWN_EXTRA_ID',
-            actionLabelTh: `หักสร้าง Extra ID (${sp.label})`,
-            rank: sp.rank,
-            amountUsdt: cost,
+            amountUsdt: amt,
             poolType: 'EXTRA_ID_POOL',
             poolLabelTh: 'Extra ID Pool',
-            descriptionTh: `หัก ${cost.toFixed(2)} USDT จาก Extra ID Pool สร้าง ${sp.label} ในผัง Rank ${sp.rank}`,
-            note: `สร้าง Extra ID สำเร็จ (ID #${sp.id})`,
-            poolBalanceAfterUsdt: 0,
-            balanceAfterUsdt: 0,
+            descriptionTh: inf.note || `รับ 35% Vault (+${amt.toFixed(2)} USDT) จากเม็ดซ้ายของ Extra ID ใน Rank ${inf.rank} เข้า Extra ID Pool`,
+            note: inf.note,
+            poolBalanceAfterUsdt: runningExtraPool,
+            balanceAfterUsdt: netRunningTotal,
           });
-        });
+        };
 
-        // 4. Outflow Events: Upgrades
-        if (upDeduct > 0) {
-          const userRankNodes = (rep.rankNodesList || [])
-            .filter((rn: any) => !rn.isClone && !rn.isExtraId && rn.rank >= 2)
-            .sort((a: any, b: any) => a.rank - b.rank);
+        const flushExtraOutQueue = (refTimestamp: string) => {
+          let progressed = true;
+          while (progressed) {
+            progressed = false;
+            while (extraOutQueue.length > 0) {
+              const nextCost = RANK_PRICES_USDT[extraOutQueue[0].rank - 1] || 10;
+              if (runningExtraPool + 1e-4 < nextCost) break;
+              const sp = extraOutQueue.shift()!;
+              const cost = Number(nextCost.toFixed(2));
+              runningExtraPool = Number(Math.max(0, runningExtraPool - cost).toFixed(2));
+              netRunningTotal = Number(Math.max(0, netRunningTotal - cost).toFixed(2));
+              ledgerEvents.push({
+                id: `v-out-extra-${rep.id}-${sp.rank}-${sp.id}`,
+                timestamp: refTimestamp || sp.timestamp,
+                direction: 'OUT',
+                actionType: 'SPAWN_EXTRA_ID',
+                actionLabelTh: `หักสร้าง Extra ID (${sp.label})`,
+                rank: sp.rank,
+                amountUsdt: cost,
+                poolType: 'EXTRA_ID_POOL',
+                poolLabelTh: 'Extra ID Pool',
+                descriptionTh: `หัก ${cost.toFixed(2)} USDT จาก Extra ID Pool สร้าง ${sp.label} ในผัง Rank ${sp.rank} (วางใต้ R${sp.rank}-#${sp.parentId} ฝั่ง${sp.side === 'LEFT' ? 'ซ้าย' : 'ขวา'})`,
+                note: `สร้าง ${sp.label} สำเร็จ`,
+                poolBalanceAfterUsdt: runningExtraPool,
+                balanceAfterUsdt: netRunningTotal,
+              });
+              progressed = true;
 
-          let remUpToAllocate = upDeduct;
-          for (let i = 0; i < userRankNodes.length && remUpToAllocate > 0; i++) {
-            const rn = userRankNodes[i];
-            const prevR = rn.rank - 1;
-            const rPrice = RANK_PRICES_USDT[rn.rank - 1] || 10;
-            const maxForThis = Math.min(rPrice, remUpToAllocate);
-            const amtToDeduct = Number(maxForThis.toFixed(2));
-            remUpToAllocate = Number((remUpToAllocate - amtToDeduct).toFixed(2));
-
-            const origNode = (matrixDB.nodesByRank[rn.rank] || []).find((n) => n.id === rn.nodeId);
-            const uTime = origNode?.createdAt || (sortedInflows[0]?.timestamp ? new Date(new Date(sortedInflows[0].timestamp).getTime() + (i + 1) * 1000).toISOString() : new Date().toISOString());
-            ledgerEvents.push({
-              id: `v-out-up-${rep.id}-${rn.rank}`,
-              timestamp: uTime,
-              direction: 'OUT',
-              actionType: 'AUTO_UPGRADE',
-              actionLabelTh: `หักอัปเกรด (สู่ Rank ${rn.rank})`,
-              rank: rn.rank,
-              amountUsdt: amtToDeduct,
-              poolType: 'UPGRADE_POOL',
-              poolLabelTh: 'Upgrade Pool',
-              descriptionTh: `หัก ${amtToDeduct.toFixed(2)} USDT จาก Upgrade Pool เพื่ออัปเกรด Main #${rep.id} จาก Rank ${prevR} สู่ Rank ${rn.rank}`,
-              note: `อัปเกรดสู่ Rank ${rn.rank} สำเร็จ`,
-              poolBalanceAfterUsdt: 0,
-              balanceAfterUsdt: 0,
-            });
+              // Any Extra Left-Child bonus generated by this newly spawned Extra ID becomes active now
+              const tag = `Extra R${sp.rank}-#${sp.id}`;
+              for (let i = 0; i < pendingExtraLeftInflows.length; i++) {
+                if ((pendingExtraLeftInflows[i].note || '').includes(tag)) {
+                  const matchedInf = pendingExtraLeftInflows.splice(i, 1)[0];
+                  i--;
+                  processExtraLeftBonusInflow(matchedInf, refTimestamp || sp.timestamp);
+                }
+              }
+            }
           }
+        };
 
-          if (remUpToAllocate > 0) {
-            ledgerEvents.push({
-              id: `v-out-up-${rep.id}-rem`,
-              timestamp: new Date().toISOString(),
-              direction: 'OUT',
-              actionType: 'AUTO_UPGRADE',
-              actionLabelTh: 'หักอัปเกรดสะสม',
-              rank: rep.currentMaxRank || 2,
-              amountUsdt: remUpToAllocate,
-              poolType: 'UPGRADE_POOL',
-              poolLabelTh: 'Upgrade Pool',
-              descriptionTh: `หัก ${remUpToAllocate.toFixed(2)} USDT จาก Upgrade Pool เพื่อสะสมอัปเกรดแรงค์`,
-              note: 'อัปเกรดแรงค์สำเร็จ',
-              poolBalanceAfterUsdt: 0,
-              balanceAfterUsdt: 0,
-            });
-          }
-        }
+        for (let r = 1; r <= 27; r++) {
+          const regList = regularInflowsByRank.get(r) || [];
+          if (regList.length === 0) continue;
 
-        // Sort chronological (oldest first) to compute running total
-        ledgerEvents.sort(
-          (a, b) => (new Date(a.timestamp).getTime() || 0) - (new Date(b.timestamp).getTime() || 0)
-        );
-        let netRunningTotal = 0;
-        for (const ev of ledgerEvents) {
-          if (ev.direction === 'IN') {
-            netRunningTotal = Number((netRunningTotal + ev.amountUsdt).toFixed(2));
+          const grossRegR = Number(
+            regList.reduce((s, x) => s + Number(x.amountUsdt || 0), 0).toFixed(2)
+          );
+          const remInR = Number(stats.vaultsByRank?.[r] ?? 0);
+          const deductedRegR = Math.max(0, Number((grossRegR - remInR).toFixed(2)));
+          const inWindow5 =
+            (rep.currentMaxRank || 1) < 27 && r >= stats.window5Start && r <= stats.window5End;
+
+          let upUsedInR = 0;
+          if (r <= 3) {
+            if (inWindow5) {
+              upUsedInR = Math.min(deductedRegR, remUpDeductToAlloc);
+              remUpDeductToAlloc = Number((remUpDeductToAlloc - upUsedInR).toFixed(2));
+            } else {
+              const autoUsedInR = Math.min(deductedRegR, remAutoDeductToAlloc);
+              remAutoDeductToAlloc = Number((remAutoDeductToAlloc - autoUsedInR).toFixed(2));
+              upUsedInR = Math.min(
+                Number((deductedRegR - autoUsedInR).toFixed(2)),
+                remUpDeductToAlloc
+              );
+              remUpDeductToAlloc = Number((remUpDeductToAlloc - upUsedInR).toFixed(2));
+            }
           } else {
-            netRunningTotal = Number(Math.max(0, netRunningTotal - ev.amountUsdt).toFixed(2));
+            if (inWindow5) {
+              upUsedInR = Math.min(deductedRegR, remUpDeductToAlloc);
+              remUpDeductToAlloc = Number((remUpDeductToAlloc - upUsedInR).toFixed(2));
+            } else {
+              const extraUsedInR = Math.min(deductedRegR, remExtraRegDeductToAlloc);
+              remExtraRegDeductToAlloc = Number(
+                (remExtraRegDeductToAlloc - extraUsedInR).toFixed(2)
+              );
+              upUsedInR = Math.min(
+                Number((deductedRegR - extraUsedInR).toFixed(2)),
+                remUpDeductToAlloc
+              );
+              remUpDeductToAlloc = Number((remUpDeductToAlloc - upUsedInR).toFixed(2));
+            }
           }
-          ev.balanceAfterUsdt = netRunningTotal;
+
+          let remUpShareInR = upUsedInR;
+          let upgradeEmittedForR = false;
+
+          for (const inf of regList) {
+            const amt = Number(Number(inf.amountUsdt || 0).toFixed(2));
+            const secondaryPoolType: 'UPGRADE_POOL' | 'AUTO_ID_POOL' | 'EXTRA_ID_POOL' = inWindow5
+              ? 'UPGRADE_POOL'
+              : r <= 3
+              ? 'AUTO_ID_POOL'
+              : 'EXTRA_ID_POOL';
+            const secondaryPoolLabel =
+              secondaryPoolType === 'UPGRADE_POOL'
+                ? 'Upgrade Pool'
+                : secondaryPoolType === 'AUTO_ID_POOL'
+                ? 'Auto ID Pool'
+                : 'Extra ID Pool';
+
+            const upPart = Math.min(amt, remUpShareInR);
+            const otherPart = Number((amt - upPart).toFixed(2));
+            remUpShareInR = Number((remUpShareInR - upPart).toFixed(2));
+
+            if (upPart > 0) {
+              runningUpgradePool = Number((runningUpgradePool + upPart).toFixed(2));
+            }
+            if (otherPart > 0) {
+              if (secondaryPoolType === 'UPGRADE_POOL') {
+                runningUpgradePool = Number((runningUpgradePool + otherPart).toFixed(2));
+              } else if (secondaryPoolType === 'AUTO_ID_POOL') {
+                runningAutoPool = Number((runningAutoPool + otherPart).toFixed(2));
+              } else {
+                runningExtraPool = Number((runningExtraPool + otherPart).toFixed(2));
+              }
+            }
+            netRunningTotal = Number((netRunningTotal + amt).toFixed(2));
+
+            const displayPoolType = upPart >= otherPart && upPart > 0 ? 'UPGRADE_POOL' : secondaryPoolType;
+            const displayPoolLabel =
+              displayPoolType === 'UPGRADE_POOL' ? 'Upgrade Pool' : secondaryPoolLabel;
+            const displayPoolBal =
+              displayPoolType === 'UPGRADE_POOL'
+                ? runningUpgradePool
+                : displayPoolType === 'AUTO_ID_POOL'
+                ? runningAutoPool
+                : runningExtraPool;
+
+            ledgerEvents.push({
+              id: `v-in-${rep.id}-${ledgerEvents.length + 1}`,
+              timestamp: inf.timestamp,
+              direction: 'IN',
+              actionType: 'RECEIVE_VAULT',
+              actionLabelTh: `รับ 35% Vault (Rank ${inf.rank})`,
+              rank: inf.rank,
+              amountUsdt: amt,
+              poolType: displayPoolType,
+              poolLabelTh: displayPoolLabel,
+              descriptionTh: `${inf.note} (+${amt.toFixed(2)} USDT เข้า ${displayPoolLabel})`,
+              note: inf.note,
+              poolBalanceAfterUsdt: displayPoolBal,
+              balanceAfterUsdt: netRunningTotal,
+            });
+
+            if (
+              !upgradeEmittedForR &&
+              upUsedInR > 0 &&
+              remUpShareInR <= 1e-4 &&
+              runningUpgradePool + 1e-4 >= upUsedInR
+            ) {
+              upgradeEmittedForR = true;
+              const targetUpRank = Math.min(27, r + 1);
+              runningUpgradePool = Number(Math.max(0, runningUpgradePool - upUsedInR).toFixed(2));
+              netRunningTotal = Number(Math.max(0, netRunningTotal - upUsedInR).toFixed(2));
+              ledgerEvents.push({
+                id: `v-out-up-${rep.id}-${r}`,
+                timestamp: inf.timestamp,
+                direction: 'OUT',
+                actionType: 'AUTO_UPGRADE',
+                actionLabelTh: `หักอัปเกรด (จาก R${r} สู่ Rank ${targetUpRank})`,
+                rank: targetUpRank,
+                amountUsdt: upUsedInR,
+                poolType: 'UPGRADE_POOL',
+                poolLabelTh: 'Upgrade Pool',
+                descriptionTh: `หัก ${upUsedInR.toFixed(2)} USDT จาก Upgrade Pool (สะสมใน Rank ${r}) เพื่ออัปเกรด Main #${rep.id} สู่ Rank ${targetUpRank}`,
+                note: `อัปเกรดสู่ Rank ${targetUpRank} สำเร็จ`,
+                poolBalanceAfterUsdt: runningUpgradePool,
+                balanceAfterUsdt: netRunningTotal,
+              });
+            }
+
+            flushAutoOutQueue(inf.timestamp);
+            flushExtraOutQueue(inf.timestamp);
+          }
         }
 
-        // Sort descending (newest first) for UI presentation
-        ledgerEvents.sort(
-          (a, b) => (new Date(b.timestamp).getTime() || 0) - (new Date(a.timestamp).getTime() || 0)
-        );
-        rep.vault35Ledger = ledgerEvents;
+        // Flush any remaining pending Extra Left Bonus inflows and outflow queues
+        while (pendingExtraLeftInflows.length > 0) {
+          const nextExtraInf = pendingExtraLeftInflows.shift()!;
+          processExtraLeftBonusInflow(nextExtraInf);
+          flushExtraOutQueue(nextExtraInf.timestamp);
+        }
+        flushAutoOutQueue(new Date().toISOString());
+        flushExtraOutQueue(new Date().toISOString());
+
+        // Reverse causal chronological array so newest transaction is at index 0 (top of UI table)
+        rep.vault35Ledger = ledgerEvents.slice().reverse();
       }
 
       const allReports = Array.from(reportsMap.values()).sort((a, b) => a.id - b.id);

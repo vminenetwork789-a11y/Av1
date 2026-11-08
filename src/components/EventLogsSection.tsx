@@ -1793,8 +1793,13 @@ export const EventLogsSection: React.FC<EventLogsSectionProps> = ({ language, ac
                                         {isIn ? '+' : '-'}{Number(item.amountUsdt).toFixed(2)} U
                                       </div>
                                       <div className="text-[9.5px] text-amber-300 font-bold">
-                                        คงเหลือ {Number(item.balanceAfterUsdt ?? 0).toFixed(2)} U
+                                        คงเหลือรวม {Number(item.balanceAfterUsdt ?? 0).toFixed(2)} U
                                       </div>
+                                      {typeof item.poolBalanceAfterUsdt === 'number' && (
+                                        <div className="text-[9px] text-slate-400">
+                                          {item.poolLabelTh || 'กระปุกนี้'}: {Number(item.poolBalanceAfterUsdt).toFixed(2)} U
+                                        </div>
+                                      )}
                                     </div>
                                   </div>
                                 );

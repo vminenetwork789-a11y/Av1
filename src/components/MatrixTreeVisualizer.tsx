@@ -3809,9 +3809,22 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
           extraLeftVaultForSponsor
         );
 
-        node.upgradeRankPool = isExtraLineage ? 0 : pools.upgradeRankPool;
-        node.newAutoIdPool = isExtraLineage ? 0 : pools.newAutoIdPool;
-        node.newExtraIdPool = isExtraLineage ? 0 : pools.newExtraIdPool;
+        const repForTargetMain = perIdReportsMap.get(targetMainId);
+        node.upgradeRankPool = isExtraLineage
+          ? 0
+          : typeof repForTargetMain?.upgradeRankPool === 'number'
+          ? repForTargetMain.upgradeRankPool
+          : pools.upgradeRankPool;
+        node.newAutoIdPool = isExtraLineage
+          ? 0
+          : typeof repForTargetMain?.newAutoIdPool === 'number'
+          ? repForTargetMain.newAutoIdPool
+          : pools.newAutoIdPool;
+        node.newExtraIdPool = isExtraLineage
+          ? 0
+          : typeof repForTargetMain?.newExtraIdPool === 'number'
+          ? repForTargetMain.newExtraIdPool
+          : pools.newExtraIdPool;
         node.targetMainIdCurrentRank = pools.currentRank;
         node.window5Start = pools.window5Start;
         node.window5End = pools.window5End;
@@ -6800,6 +6813,9 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
         const rawVaultLedger: any[] = mainReport?.vault35Ledger || [];
         const vaultInflowCount = rawVaultLedger.filter((item: any) => item.direction === 'IN').length;
         const vaultOutflowCount = rawVaultLedger.filter((item: any) => item.direction === 'OUT').length;
+        const upgradeOutflowCount = rawVaultLedger.filter(
+          (item: any) => item.direction === 'OUT' && item.actionType === 'AUTO_UPGRADE'
+        ).length;
         const filteredVaultLedger: any[] = rawVaultLedger.filter((item: any) => {
           if (vaultLedgerFilter === 'in') return item.direction === 'IN';
           if (vaultLedgerFilter === 'out') return item.direction === 'OUT';
@@ -7807,7 +7823,7 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
                             +{(mainReport?.vault35GrossTotalUsdt ?? 0).toFixed(2)} USDT
                           </span>
                           <span className="text-slate-400 text-[10px] block">
-                            จากเม็ดซ้าย {vaultHistory.length} ครั้ง
+                            จากเม็ดซ้าย {vaultInflowCount > 0 ? vaultInflowCount : vaultHistory.length} ครั้ง
                           </span>
                         </div>
                         <div className="space-y-1 border-t md:border-t-0 md:border-l border-slate-800 md:pl-2.5">
@@ -7823,7 +7839,7 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
                                 <div>• สร้าง Extra ID: <strong className="text-rose-300">-{Number(mainReport?.vaultDeductedBreakdown?.extraIdsTotalUsdt ?? 0).toFixed(2)} U</strong> ({extraIdsList.length} รหัส)</div>
                                 <div>• สร้าง Auto ID: <strong className="text-amber-300">-{Number(mainReport?.vaultDeductedBreakdown?.autoIdsTotalUsdt ?? 0).toFixed(2)} U</strong> ({autoIdsList.length} รหัส)</div>
                                 {(mainReport?.vaultDeductedBreakdown?.upgradesTotalUsdt ?? 0) > 0 && (
-                                  <div>• หักอัปเกรดแรงค์: <strong className="text-cyan-300">-{Number(mainReport?.vaultDeductedBreakdown?.upgradesTotalUsdt).toFixed(2)} U</strong></div>
+                                  <div>• หักอัปเกรดแรงค์: <strong className="text-cyan-300">-{Number(mainReport?.vaultDeductedBreakdown?.upgradesTotalUsdt).toFixed(2)} U</strong>{upgradeOutflowCount > 0 ? ` (${upgradeOutflowCount} ครั้ง)` : ''}</div>
                                 )}
                               </>
                             )}
@@ -7844,7 +7860,7 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
 
                       {/* ตัวกรอง รับเข้า vs นำไปใช้ (Inflow vs Outflow Filter Tabs) */}
                       {rawVaultLedger.length > 0 && (
-                        <div className="flex items-center gap-1.5 pt-1">
+                        <div className="flex flex-wrap items-center gap-1.5 pt-1">
                           <button
                             type="button"
                             onClick={() => {
@@ -7871,7 +7887,7 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
                                 : 'bg-slate-900 text-emerald-400/80 hover:text-emerald-300 border border-slate-800'
                             }`}
                           >
-                            <span>🟢 รับเข้า 35% ({vaultInflowCount})</span>
+                            <span>🟢 รับเข้า 35% ({vaultInflowCount} • +{(mainReport?.vault35GrossTotalUsdt ?? 0).toFixed(2)} U)</span>
                           </button>
                           <button
                             type="button"
@@ -7885,7 +7901,7 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
                                 : 'bg-slate-900 text-rose-400/80 hover:text-rose-300 border border-slate-800'
                             }`}
                           >
-                            <span>🔴 นำไปใช้/หักออก ({vaultOutflowCount})</span>
+                            <span>🔴 นำไปใช้/หักออก ({vaultOutflowCount} • -{(mainReport?.vault35DeductedTotalUsdt ?? 0).toFixed(2)} U)</span>
                           </button>
                         </div>
                       )}
@@ -7954,8 +7970,13 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
                                       {isIn ? '+' : '-'}{Number(item.amountUsdt).toFixed(2)} USDT
                                     </div>
                                     <div className="text-[9.5px] text-amber-300 font-extrabold bg-slate-900/90 px-1.5 py-0.5 rounded border border-slate-700/80">
-                                      คงเหลือ: {Number(item.balanceAfterUsdt ?? 0).toFixed(2)} U
+                                      คงเหลือรวม: {Number(item.balanceAfterUsdt ?? 0).toFixed(2)} U
                                     </div>
+                                    {typeof item.poolBalanceAfterUsdt === 'number' && (
+                                      <div className="text-[9px] text-slate-400 font-mono">
+                                        {item.poolLabelTh || 'กระปุกนี้'}: {Number(item.poolBalanceAfterUsdt).toFixed(2)} U
+                                      </div>
+                                    )}
                                   </div>
                                 </div>
                               );
