@@ -2779,10 +2779,8 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
           if (typeof repExtraBonus === 'number') {
             remainingExtraLeftBonus = repExtraBonus;
           } else {
-            // Smart Contract & Database rules: Extra ID costs are absorbed by R4..27 vaults first
-            const deductedFromR4To27 = Math.max(0, Number((totalGross4To27 - totalRem4To27).toFixed(4)));
-            const remainingCostForBonus = Math.max(0, Number((totalExtraCostForMain - deductedFromR4To27).toFixed(4)));
-            const deductedFromExtraLeftBonus = Math.min(extraLeftVaultBonusGross, remainingCostForBonus);
+            // Smart Contract & Database rules: Extra ID costs are absorbed by extraLeftVaultBonus FIRST!
+            const deductedFromExtraLeftBonus = Math.min(extraLeftVaultBonusGross, totalExtraCostForMain);
             remainingExtraLeftBonus = Math.max(
               0,
               Number((extraLeftVaultBonusGross - deductedFromExtraLeftBonus).toFixed(4))

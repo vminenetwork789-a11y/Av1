@@ -3504,13 +3504,9 @@ async function startApp() {
         }
       }
     }
-    const deductedFromR4To27 = Math.max(
-      0,
-      Number((grossR4To27OutsideWindow - r4To27OutsideWindow).toFixed(4))
-    );
     const deductedFromExtraLeftBonus = Math.min(
       extraLeftVaultBonusGross,
-      Math.max(0, Number((extraIdDeductedTotalUsdt - deductedFromR4To27).toFixed(4)))
+      extraIdDeductedTotalUsdt
     );
     const extraLeftVaultBonus = Math.max(
       0,
