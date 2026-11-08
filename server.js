@@ -138,7 +138,7 @@ var __dirname = path.dirname(__filename);
 var PORT = Number(process.env.PORT) || 3e3;
 var CONFIG_FILE_PATH = path.resolve(__dirname, "prisma/contract-config.json");
 var DEFAULT_SYSTEM_CONFIG = {
-  contractAddress: process.env.OVERRIDE_CONTRACT_ADDRESS || process.env.CONTRACT_ADDRESS || "0x792Cd37F508b97E4F86D8747fE7888a281dD1158",
+  contractAddress: process.env.OVERRIDE_CONTRACT_ADDRESS || process.env.CONTRACT_ADDRESS || "0xda9dA3B56b75F5D59aC0b17B402e79Dd3DdDFFba",
   usdtAddress: process.env.USDT_ADDRESS || "0x05f24E1F598DF1aE8d0B424ce978f8ea33bB752b",
   chainId: Number(process.env.CHAIN_ID || 97),
   networkName: process.env.NETWORK_NAME || "BNB Smart Chain Testnet",

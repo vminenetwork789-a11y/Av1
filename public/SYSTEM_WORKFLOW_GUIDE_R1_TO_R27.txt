@@ -3,7 +3,7 @@
                ตั้งแต่เริ่มต้นสมัครสมาชิก จนถึงจุดสูงสุด RANK 27
 ================================================================================
 
-Smart Contract : 0x792Cd37F508b97E4F86D8747fE7888a281dD1158
+Smart Contract : 0xda9dA3B56b75F5D59aC0b17B402e79Dd3DdDFFba
 Network        : BNB Smart Chain Testnet (Chain ID: 97)
 USDT Token     : 0x05f24E1F598DF1aE8d0B424ce978f8ea33bB752b
 ผู้พัฒนา/เจ้าของผังหลัก : 0x622E20082e63c7220c5AF0A77Cbc437a98505311 (Root Main #1)
