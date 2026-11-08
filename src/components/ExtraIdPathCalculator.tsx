@@ -146,14 +146,27 @@ export function calculateMatrixUpgradePath(
   const targetMainId = Math.max(1, Math.floor(targetMainIdInput || 2));
   const prospectiveRank = Math.min(27, Math.max(2, Math.floor(prospectiveRankInput || 10)));
 
+  // Map of rank => (originId => count of clones already spawned in that rank)
+  // Mirroring on-chain mapping: nodeCloneTotalCount[rank][originId]
+  const rankCloneCounts = new Map<number, Map<number, number>>();
+  for (let r = 1; r <= 27; r++) {
+    rankCloneCounts.set(r, new Map<number, number>());
+  }
+
   // Deep-clone all 27 rank maps so simulation never mutates live UI state
   const simRanks = new Map<number, Map<number, SimRawNode>>();
   for (let r = 1; r <= 27; r++) {
     const srcMap = multiRankSnapshots.get(r);
     const clonedMap = new Map<number, SimRawNode>();
+    const rCloneCounts = rankCloneCounts.get(r)!;
     if (srcMap) {
       for (const [k, v] of srcMap.entries()) {
-        clonedMap.set(k, { ...v });
+        const clonedNode: SimRawNode = { ...v };
+        clonedMap.set(k, clonedNode);
+        if (clonedNode.isClone) {
+          const origKey = clonedNode.originMainId > 0 ? clonedNode.originMainId : clonedNode.id;
+          rCloneCounts.set(origKey, (rCloneCounts.get(origKey) || 0) + 1);
+        }
       }
     }
     if (clonedMap.size === 0) {
@@ -592,8 +605,17 @@ export function calculateMatrixUpgradePath(
           : getCorrespondingNodeInRank(originR1Main, rank) || parentNode.originMainId || parentNode.id;
       const originNode = snapR.get(localCorrespId) || parentNode;
 
-      const curClonesCount = originNode.totalClonesSpawned || 0;
-      const roundIdx = curClonesCount % 2; // 0 => Round 1 (Sponsor), 1 => Round 2 (Global BFS under Root #1)
+      // Smart contract tracks: nodeCloneTotalCount[rank][cloneOriginId]
+      const cloneOriginId =
+        rank === 1 || originNode.isExtraId
+          ? originNode.id
+          : getCorrespondingNodeInRank(originR1Main, rank) || originNode.id;
+      const rCounts = rankCloneCounts.get(rank)!;
+      const curClonesCount = rCounts.get(cloneOriginId) || 0;
+      // Round logic in contract: currentRound = uint8(nodeCloneTotalCount[rank][originId] % 2);
+      // 0 => Round 1 (Sponsor tree / clone), 1 => Round 2 (Global BFS under Root #1)
+      const roundIdx = curClonesCount % 2;
+      rCounts.set(cloneOriginId, curClonesCount + 1);
       originNode.totalClonesSpawned = curClonesCount + 1;
 
       let sponsorTargetInRank = 1;
@@ -626,11 +648,13 @@ export function calculateMatrixUpgradePath(
         cloneSpot.isLeft,
         true,
         false,
-        rank === 1 || originNode.isExtraId ? originNode.id : originR1Main,
+        cloneOriginId,
         lockedR1SponsorId,
         'CLONE'
       );
+      cloneNode.cloneRound = roundIdx + 1;
 
+      const roundLabel = roundIdx === 0 ? 'รอบ 1 (ติดผู้แนะนำ)' : 'รอบ 2 (ผังรวม BFS)';
       stepChainEvents.push({
         type: 'CLONE',
         rank,
@@ -638,7 +662,7 @@ export function calculateMatrixUpgradePath(
         ownerMainId: originR1Main,
         parentId: cloneSpot.parentId,
         side: cloneSpot.isLeft ? 'LEFT' : 'RIGHT',
-        descriptionTh: `R${rank}-#${parentId} ครบซ้าย-ขวา → เด้งโคลน R${rank}-#${cloneNode.id} (ของ Main #${originR1Main} • รอบ ${roundIdx + 1}) ไปวางใต้ R${rank}-#${cloneSpot.parentId} (${cloneSpot.isLeft ? 'ซ้าย' : 'ขวา'})`,
+        descriptionTh: `R${rank}-#${parentId} ครบซ้าย-ขวา → เด้งโคลน R${rank}-#${cloneNode.id} (ของ Main #${originR1Main} • ${roundLabel}) ไปวางใต้ R${rank}-#${cloneSpot.parentId} (${cloneSpot.isLeft ? 'ซ้าย' : 'ขวา'})`,
       });
 
       processNodePlacementCascade(
