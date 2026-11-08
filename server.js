@@ -3545,13 +3545,13 @@ async function startApp() {
       0,
       Number((grossR4To27OutsideWindow - r4To27OutsideWindow).toFixed(4))
     );
-    const extraDeductedFromR4To27 = Math.min(
+    const extraDeductedFromR4To27ForBonus = mainIdNum === 1 ? Math.min(
       extraIdDeductedTotalUsdt,
       Math.max(0, Number((totalDeductedFromR4To27 - upgradeDeductedInR4To27).toFixed(4)))
-    );
+    ) : 0;
     const remainingExtraCostForBonus = Math.max(
       0,
-      Number((extraIdDeductedTotalUsdt - extraDeductedFromR4To27).toFixed(4))
+      Number((extraIdDeductedTotalUsdt - extraDeductedFromR4To27ForBonus).toFixed(4))
     );
     const deductedFromExtraLeftBonus = Math.min(
       extraLeftVaultBonusGross,
@@ -3561,7 +3561,7 @@ async function startApp() {
       0,
       Number((extraLeftVaultBonusGross - deductedFromExtraLeftBonus).toFixed(4))
     );
-    const extraLeftVaultBonus = !isExtraOrCloneOfExtra && typeof targetNode?.extraPoolBonusOnChain === "number" ? Math.max(computedExtraLeftVaultBonus, Number(targetNode.extraPoolBonusOnChain.toFixed(4))) : isExtraOrCloneOfExtra ? 0 : computedExtraLeftVaultBonus;
+    const extraLeftVaultBonus = isExtraOrCloneOfExtra ? 0 : typeof targetNode?.extraPoolBonusOnChain === "number" ? Number(targetNode.extraPoolBonusOnChain.toFixed(4)) : computedExtraLeftVaultBonus;
     const autoMainSourceMap = reconcileRank1AutoMainIds();
     const spawnedAutoIdsList = [];
     for (const [autoId, srcMain] of autoMainSourceMap.entries()) {
@@ -3593,9 +3593,17 @@ async function startApp() {
     const alreadyDeductedInR1To3 = Math.max(0, Number((grossR1To3OutsideWindow - newAutoIdPool).toFixed(4)));
     const unappliedAutoDeduct = Math.max(0, Number((autoIdsUsedUsdt - alreadyDeductedInR1To3).toFixed(4)));
     const netAutoIdPool = Math.max(0, Number((newAutoIdPool - unappliedAutoDeduct).toFixed(4)));
+    const remainingExtraCostForR4To27 = Math.max(
+      0,
+      Number((extraIdDeductedTotalUsdt - deductedFromExtraLeftBonus).toFixed(4))
+    );
+    const alreadyDeductedInR4To27ForExtra = Math.min(
+      remainingExtraCostForR4To27,
+      Math.max(0, Number((totalDeductedFromR4To27 - upgradeDeductedInR4To27).toFixed(4)))
+    );
     const unappliedExtraDeduct = Math.max(
       0,
-      Number((extraIdDeductedTotalUsdt - deductedFromExtraLeftBonus - extraDeductedFromR4To27).toFixed(4))
+      Number((remainingExtraCostForR4To27 - alreadyDeductedInR4To27ForExtra).toFixed(4))
     );
     const netR4To27 = Math.max(0, Number((r4To27OutsideWindow - unappliedExtraDeduct).toFixed(4)));
     const oldCarryoverVault = Number(

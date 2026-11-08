@@ -4694,19 +4694,24 @@ async function startApp() {
     );
 
     // คำนวณยอดคงเหลือของรายได้จากไอดี Extra ID (extraLeftVaultBonus):
-    // ยอด R4..R27 บนเชน (r4To27OutsideWindow) ได้ถูกหักต้นทุนสร้าง Extra ID ไปแล้วบางส่วน (extraDeductedFromR4To27)
-    // ส่วนที่เหลือของต้นทุน Extra ID (remainingExtraCostForBonus) จึงถูกหักออกจาก extraLeftVaultBonusGross
+    // - บน Smart Contract (_deductExtraPool) จะหักจาก mainIdExtraPoolBonus ก่อน แล้วจึงหักจาก R4..R27
+    // - สำหรับ Main #1 (Root #1 เริ่มที่ Rank 27 ตั้งต้น ไม่เคยหักอัพเกรด Rank) ยอดที่หายไปจาก R4..R27 (totalDeductedFromR4To27) คือยอดที่หักสร้าง Extra ID ล้วนๆ
+    //   ส่วนที่เหลือของต้นทุน Extra ID จึงเป็นส่วนที่หักจาก extraLeftVaultBonusGross (73.50 - 69.50 = 4.00 U)
+    // - สำหรับ Main ID อื่นๆ (mainIdNum > 1) ที่อัพเกรดมาจาก Rank 1 ยอด R4..R27 มีการหักอัพเกรด Rank ปนอยู่ด้วย และสัญญาหักโบนัส Extra ID ก่อนเสมอ
     const totalDeductedFromR4To27 = Math.max(
       0,
       Number((grossR4To27OutsideWindow - r4To27OutsideWindow).toFixed(4))
     );
-    const extraDeductedFromR4To27 = Math.min(
-      extraIdDeductedTotalUsdt,
-      Math.max(0, Number((totalDeductedFromR4To27 - upgradeDeductedInR4To27).toFixed(4)))
-    );
+    const extraDeductedFromR4To27ForBonus =
+      mainIdNum === 1
+        ? Math.min(
+            extraIdDeductedTotalUsdt,
+            Math.max(0, Number((totalDeductedFromR4To27 - upgradeDeductedInR4To27).toFixed(4)))
+          )
+        : 0;
     const remainingExtraCostForBonus = Math.max(
       0,
-      Number((extraIdDeductedTotalUsdt - extraDeductedFromR4To27).toFixed(4))
+      Number((extraIdDeductedTotalUsdt - extraDeductedFromR4To27ForBonus).toFixed(4))
     );
     const deductedFromExtraLeftBonus = Math.min(
       extraLeftVaultBonusGross,
@@ -4716,12 +4721,11 @@ async function startApp() {
       0,
       Number((extraLeftVaultBonusGross - deductedFromExtraLeftBonus).toFixed(4))
     );
-    const extraLeftVaultBonus =
-      !isExtraOrCloneOfExtra && typeof targetNode?.extraPoolBonusOnChain === 'number'
-        ? Math.max(computedExtraLeftVaultBonus, Number(targetNode.extraPoolBonusOnChain.toFixed(4)))
-        : isExtraOrCloneOfExtra
-        ? 0
-        : computedExtraLeftVaultBonus;
+    const extraLeftVaultBonus = isExtraOrCloneOfExtra
+      ? 0
+      : typeof targetNode?.extraPoolBonusOnChain === 'number'
+      ? Number(targetNode.extraPoolBonusOnChain.toFixed(4))
+      : computedExtraLeftVaultBonus;
 
     const autoMainSourceMap = reconcileRank1AutoMainIds();
     const spawnedAutoIdsList: number[] = [];
@@ -4763,9 +4767,17 @@ async function startApp() {
     const netAutoIdPool = Math.max(0, Number((newAutoIdPool - unappliedAutoDeduct).toFixed(4)));
 
     // หักยอดที่นำไปใช้สร้าง Extra ID เฉพาะกรณีที่ r4To27OutsideWindow ยังไม่ได้หักบนเชน
+    const remainingExtraCostForR4To27 = Math.max(
+      0,
+      Number((extraIdDeductedTotalUsdt - deductedFromExtraLeftBonus).toFixed(4))
+    );
+    const alreadyDeductedInR4To27ForExtra = Math.min(
+      remainingExtraCostForR4To27,
+      Math.max(0, Number((totalDeductedFromR4To27 - upgradeDeductedInR4To27).toFixed(4)))
+    );
     const unappliedExtraDeduct = Math.max(
       0,
-      Number((extraIdDeductedTotalUsdt - deductedFromExtraLeftBonus - extraDeductedFromR4To27).toFixed(4))
+      Number((remainingExtraCostForR4To27 - alreadyDeductedInR4To27ForExtra).toFixed(4))
     );
     const netR4To27 = Math.max(0, Number((r4To27OutsideWindow - unappliedExtraDeduct).toFixed(4)));
 

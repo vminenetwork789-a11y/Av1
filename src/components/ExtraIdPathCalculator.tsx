@@ -346,7 +346,8 @@ export function calculateMatrixUpgradePath(
       }
     }
 
-    const deductedFromR4To27 = Math.max(0, Number((grossR4To27 - remR4To27).toFixed(4)));
+    const deductedFromR4To27 =
+      mId === 1 ? Math.max(0, Number((grossR4To27 - remR4To27).toFixed(4))) : 0;
     const remainingCostForBonus = Math.max(0, Number((totalExtraCost - deductedFromR4To27).toFixed(4)));
     const deductedFromBonus = Math.min(grossBonus, remainingCostForBonus);
     extraLeftBonusByMain.set(mId, Math.max(0, Number((grossBonus - deductedFromBonus).toFixed(4))));

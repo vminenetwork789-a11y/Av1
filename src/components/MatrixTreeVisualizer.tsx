@@ -2779,8 +2779,8 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
           if (typeof repExtraBonus === 'number') {
             remainingExtraLeftBonus = repExtraBonus;
           } else {
-            // หักต้นทุนสร้าง Extra ID ที่ถูกตัดไปแล้วจาก R4..R27 บนเชนก่อน ส่วนที่เหลือจึงหักออกจากโบนัสเม็ดซ้ายของ Extra ID
-            const deductedFromR4To27 = Math.max(0, Number((totalGross4To27 - totalRem4To27).toFixed(4)));
+            const deductedFromR4To27 =
+              r1Id === 1 ? Math.max(0, Number((totalGross4To27 - totalRem4To27).toFixed(4))) : 0;
             const remExtraCostForBonus = Math.max(0, Number((totalExtraCostForMain - deductedFromR4To27).toFixed(4)));
             const deductedFromExtraLeftBonus = Math.min(extraLeftVaultBonusGross, remExtraCostForBonus);
             remainingExtraLeftBonus = Math.max(
@@ -2799,16 +2799,18 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
             }
           }
 
-          const extraDeducted = Math.max(0, Number((totalGross4To27 - totalRem4To27).toFixed(4)));
+          const totalDeducted4To27 = Math.max(0, Number((totalGross4To27 - totalRem4To27).toFixed(4)));
+          const extraDeducted = Math.min(totalExtraCostForMain || totalDeducted4To27, totalDeducted4To27);
+          const upgradesDeductedIn4To27 = Math.max(0, Number((totalDeducted4To27 - extraDeducted).toFixed(4)));
           const extraSpawned = crossRankExtraIdCount.get(r1Id) || 0;
           const spawnedRanks = crossRankExtraRanksMap.get(r1Id) || [];
           const spawnedRanksLabel = spawnedRanks.length > 0 ? ` (${spawnedRanks.join(', ')})` : '';
-          if (extraGrossParts.length > 0 && (extraDeducted > 0 || extraSpawned > 0)) {
+          if (extraGrossParts.length > 0 && (totalDeducted4To27 > 0 || extraSpawned > 0)) {
             crossRankExtraBreakdownText.set(
               r1Id,
-              `รวมยอดเก่า+ยอดใหม่ก่อนสร้าง Extra ID: ${totalGross4To27.toFixed(2)} U (${extraGrossParts.join(' + ')}) • ลูป R27→R2 ออก Extra ID${spawnedRanksLabel} -${extraDeducted.toFixed(
+              `รวมยอดเก่า+ยอดใหม่ก่อนหัก: ${totalGross4To27.toFixed(2)} U (${extraGrossParts.join(' + ')}) • ลูป R27→R2 ออก Extra ID${spawnedRanksLabel} -${extraDeducted.toFixed(
                 2
-              )} U${extraRemParts.length > 0 ? ` • คงเหลือสะสมรวมยอดเก่า ${totalRem4To27.toFixed(2)} U (${extraRemParts.join(', ')})` : ''}`
+              )} U${upgradesDeductedIn4To27 > 0 ? ` • หักใช้อัพเกรด Rank -${upgradesDeductedIn4To27.toFixed(2)} U` : ''}${extraRemParts.length > 0 ? ` • คงเหลือสะสมรวมยอดเก่า ${totalRem4To27.toFixed(2)} U (${extraRemParts.join(', ')})` : ''}`
             );
           } else if (extraRemParts.length > 0) {
             crossRankExtraBreakdownText.set(
@@ -6933,17 +6935,33 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
         const window5StartRank = Math.max(1, currentMaxR - 4);
         const window5EndRank = currentMaxR;
 
+        const isExtraBonusHistoryItem = (h: any) =>
+          String(h?.note || '').includes('Extra R') ||
+          String(h?.note || '').includes('ส่งเข้า New Extra ID Pool');
+
         let calculatedUpgradeGross = 0;
         let calculatedUpgradeNet = 0;
         if (!isExtraOrCloneOfExtra && currentMaxR < 27) {
+          if (vaultHistory && vaultHistory.length > 0) {
+            calculatedUpgradeGross = vaultHistory
+              .filter(
+                (h: any) =>
+                  !isExtraBonusHistoryItem(h) &&
+                  Number(h?.rank || 0) >= window5StartRank &&
+                  Number(h?.rank || 0) <= window5EndRank
+              )
+              .reduce((s: number, h: any) => s + Number(h?.amountUsdt || 0), 0);
+          }
           if (rankNodesList && rankNodesList.length > 0) {
+            let rawSum = 0;
             for (const rn of rankNodesList) {
               const r = Number(rn.rank || 0);
               if (r >= window5StartRank && r <= window5EndRank) {
-                calculatedUpgradeGross += Number(rn.rawNodeVault ?? rn.nodeVault ?? 0);
+                rawSum += Number(rn.rawNodeVault ?? rn.nodeVault ?? 0);
                 calculatedUpgradeNet += Number(rn.nodeVault ?? 0);
               }
             }
+            calculatedUpgradeGross = Math.max(calculatedUpgradeGross, rawSum);
           }
         }
 
@@ -6959,8 +6977,11 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
         }
         const grossUpgradePool = Math.max(
           effectiveUpgradePool,
-          Number((effectiveUpgradePool + upgradesUsed).toFixed(2)),
           Number(calculatedUpgradeGross.toFixed(2))
+        );
+        const upgradeWindowDeducted = Math.max(
+          0,
+          Number((grossUpgradePool - effectiveUpgradePool).toFixed(2))
         );
 
         // สูตรคำนวณ Auto ID Pool:
@@ -6971,16 +6992,29 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
         let calculatedAutoGross = 0;
         let calculatedAutoNet = 0;
         if (!isExtraOrCloneOfExtra) {
+          if (vaultHistory && vaultHistory.length > 0) {
+            calculatedAutoGross = vaultHistory
+              .filter(
+                (h: any) =>
+                  !isExtraBonusHistoryItem(h) &&
+                  Number(h?.rank || 0) >= 1 &&
+                  Number(h?.rank || 0) <= 3 &&
+                  (currentMaxR >= 9 || Number(h?.rank || 0) < window5StartRank)
+              )
+              .reduce((s: number, h: any) => s + Number(h?.amountUsdt || 0), 0);
+          }
           if (rankNodesList && rankNodesList.length > 0) {
+            let rawSum = 0;
             for (const rn of rankNodesList) {
               const r = Number(rn.rank || 0);
               if (r >= 1 && r <= 3) {
                 if (currentMaxR >= 9 || r < window5StartRank) {
-                  calculatedAutoGross += Number(rn.rawNodeVault ?? rn.nodeVault ?? 0);
+                  rawSum += Number(rn.rawNodeVault ?? rn.nodeVault ?? 0);
                   calculatedAutoNet += Number(rn.nodeVault ?? 0);
                 }
               }
             }
+            calculatedAutoGross = Math.max(calculatedAutoGross, rawSum);
           }
         }
 
@@ -6999,29 +7033,48 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
           Number((effectiveAutoIdPool + autoIdsUsed).toFixed(2)),
           Number(calculatedAutoGross.toFixed(2))
         );
+        const autoPoolUpgradesUsed = Math.max(
+          0,
+          Number((grossAutoIdPool - effectiveAutoIdPool - autoIdsUsed).toFixed(2))
+        );
 
         // สูตรคำนวณ Extra ID Pool:
         // 1. รายได้เกิดจากไอดี Extra ID (โบนัส 35% เม็ดซ้ายของ Extra ID ที่เกิดขึ้น)
         // 2. กรณี rank < 27: รวมยอดสะสม UPGRADE_VAULT (35%) ของ rank 4 ถึง 27 ลบด้วย Upgrade Pool (อยู่นอก 5 rank ย้อนหลัง)
         //    กรณี rank == 27: รวมยอดสะสม UPGRADE_VAULT (35%) ของ rank 4 ถึง 27 ทั้งหมด
-        // 3. หากมีการนำยอดไปใช้สร้าง Extra ID ให้หักลบยอดออกด้วย (แสดงยอดคงเหลือสุทธิ)
+        // 3. หากมีการนำยอดไปใช้สร้าง Extra ID หรือหักตอนอัพเกรด Rank ให้หักลบยอดออกด้วย (แสดงยอดคงเหลือสุทธิ)
         let calculatedExtraGross = 0;
         let calculatedExtraNet = 0;
         if (!isExtraOrCloneOfExtra) {
+          if (vaultHistory && vaultHistory.length > 0) {
+            calculatedExtraGross = vaultHistory
+              .filter(
+                (h: any) =>
+                  !isExtraBonusHistoryItem(h) &&
+                  Number(h?.rank || 0) >= 4 &&
+                  Number(h?.rank || 0) <= 27 &&
+                  (currentMaxR === 27 ||
+                    Number(h?.rank || 0) < window5StartRank ||
+                    Number(h?.rank || 0) > window5EndRank)
+              )
+              .reduce((s: number, h: any) => s + Number(h?.amountUsdt || 0), 0);
+          }
           if (rankNodesList && rankNodesList.length > 0) {
+            let rawSum = 0;
             for (const rn of rankNodesList) {
               const r = Number(rn.rank || 0);
               if (r >= 4 && r <= 27) {
                 if (currentMaxR === 27 || r < window5StartRank || r > window5EndRank) {
-                  calculatedExtraGross += Number(rn.rawNodeVault ?? rn.nodeVault ?? 0);
+                  rawSum += Number(rn.rawNodeVault ?? rn.nodeVault ?? 0);
                   calculatedExtraNet += Number(rn.nodeVault ?? 0);
                 }
               }
             }
+            calculatedExtraGross = Math.max(calculatedExtraGross, rawSum);
           }
         }
         const extraInflowFromHistory = vaultHistory
-          .filter((h: any) => String(h?.note || '').includes('Extra R'))
+          .filter((h: any) => isExtraBonusHistoryItem(h))
           .reduce((s: number, h: any) => s + Number(h?.amountUsdt || 0), 0);
         const extraBonusGross = Number(
           Math.max(
@@ -7055,6 +7108,10 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
           effectiveExtraIdPool,
           Number((mainReport?.newExtraIdPoolGross ?? (effectiveExtraIdPool + extraIdsUsed)).toFixed(2)),
           Number((calculatedExtraGross + extraBonusGross).toFixed(2))
+        );
+        const extraPoolUpgradesUsed = Math.max(
+          0,
+          Number((grossExtraIdPool - effectiveExtraIdPool - extraIdsUsed).toFixed(2))
         );
 
         const effectiveTargetRank =
@@ -7374,14 +7431,19 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
                               5 แรงค์ย้อนหลัง (R{window5StartRank}-R{window5EndRank})
                             </span>
                           )}
-                          {!isExtraOrCloneOfExtra && upgradesUsed > 0 && (
+                          {!isExtraOrCloneOfExtra && upgradeWindowDeducted > 0 && (
                             <span className="text-amber-300 font-bold text-[9px] block">
-                              หักอัพเกรดแล้ว: -{upgradesUsed.toFixed(2)} U
+                              หักอัพเกรดในกรอบ: -{upgradeWindowDeducted.toFixed(2)} U
                             </span>
                           )}
-                          {!isExtraOrCloneOfExtra && upgradesUsed > 0 && (
+                          {!isExtraOrCloneOfExtra && grossUpgradePool > 0 && (
                             <span className="text-amber-200/70 text-[8.5px] block font-mono">
-                              ยอดก่อนหัก: {grossUpgradePool.toFixed(2)} U
+                              ยอดก่อนหักในกรอบ: {grossUpgradePool.toFixed(2)} U
+                            </span>
+                          )}
+                          {!isExtraOrCloneOfExtra && upgradesUsed > upgradeWindowDeducted && (
+                            <span className="text-slate-400 text-[8.5px] block font-mono">
+                              (ใช้อัพเกรดสะสมทุกระดับ: -{upgradesUsed.toFixed(2)} U)
                             </span>
                           )}
                         </div>
@@ -7410,9 +7472,14 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
                               ออกแล้ว: {autoIdsCount} รหัส {autoIdsUsed > 0 ? `(-${autoIdsUsed.toFixed(2)} U)` : ''}
                             </span>
                           )}
-                          {!isExtraOrCloneOfExtra && autoIdsUsed > 0 && (
+                          {!isExtraOrCloneOfExtra && autoPoolUpgradesUsed > 0 && (
+                            <span className="text-amber-300/90 text-[8.5px] block font-mono">
+                              หักใช้อัพเกรด Rank (R1-R3): -{autoPoolUpgradesUsed.toFixed(2)} U
+                            </span>
+                          )}
+                          {!isExtraOrCloneOfExtra && (autoIdsUsed > 0 || autoPoolUpgradesUsed > 0) && (
                             <span className="text-yellow-200/70 text-[8.5px] block font-mono">
-                              ยอดก่อนหัก: {grossAutoIdPool.toFixed(2)} U
+                              ยอดสะสมก่อนหัก: {grossAutoIdPool.toFixed(2)} U
                             </span>
                           )}
                         </div>
@@ -7440,6 +7507,11 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
                           {!isExtraOrCloneOfExtra && (
                             <span className="text-rose-300 font-bold text-[9.5px] block">
                               ออกแล้ว: {extraIdsCount} รหัส {extraIdsUsed > 0 ? `(-${extraIdsUsed.toFixed(2)} U)` : ''}
+                            </span>
+                          )}
+                          {!isExtraOrCloneOfExtra && extraPoolUpgradesUsed > 0 && (
+                            <span className="text-amber-300/90 text-[8.5px] block font-mono">
+                              หักใช้อัพเกรด Rank (R4-R27): -{extraPoolUpgradesUsed.toFixed(2)} U
                             </span>
                           )}
                           {!isExtraOrCloneOfExtra && (
