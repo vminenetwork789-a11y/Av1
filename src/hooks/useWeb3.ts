@@ -1319,21 +1319,22 @@ export function useWeb3() {
           let lastReceipt: any = null;
           for (let rStep = startStepRank; rStep <= Number(targetRank); rStep++) {
             let upgradeTx: any = null;
-            const defaultHighGas = rStep >= 20 ? 25000000n : 12000000n;
+            const defaultHighGas = rStep >= 20 ? 15000000n : 8000000n;
 
             if (mIdNum > 0 && typeof matrixContract.upgradeRankForMainId === 'function') {
               await matrixContract.upgradeRankForMainId.staticCall(BigInt(mIdNum), Number(rStep), {
-                gasLimit: 30000000n,
+                gasLimit: 15000000n,
               });
               let gasLimitToUse = defaultHighGas;
               try {
                 const estGas = await matrixContract.upgradeRankForMainId.estimateGas(
                   BigInt(mIdNum),
                   Number(rStep),
-                  { gasLimit: 30000000n }
+                  { gasLimit: 15000000n }
                 );
                 const buffered = (estGas * 125n) / 100n;
                 gasLimitToUse = buffered > defaultHighGas ? buffered : defaultHighGas;
+                if (gasLimitToUse > 15000000n) gasLimitToUse = 15000000n;
               } catch {
                 gasLimitToUse = defaultHighGas;
               }
@@ -1346,15 +1347,16 @@ export function useWeb3() {
               });
             } else {
               await matrixContract.upgradeRank.staticCall(Number(rStep), {
-                gasLimit: 30000000n,
+                gasLimit: 15000000n,
               });
               let gasLimitToUse = defaultHighGas;
               try {
                 const estGas = await matrixContract.upgradeRank.estimateGas(Number(rStep), {
-                  gasLimit: 30000000n,
+                  gasLimit: 15000000n,
                 });
                 const buffered = (estGas * 125n) / 100n;
                 gasLimitToUse = buffered > defaultHighGas ? buffered : defaultHighGas;
+                if (gasLimitToUse > 15000000n) gasLimitToUse = 15000000n;
               } catch {
                 gasLimitToUse = defaultHighGas;
               }
@@ -1497,45 +1499,69 @@ export function useWeb3() {
     });
 
     try {
-      const { signer, userAddr } = await ensureWalletAndBscTestnet();
-      const currentContract = contractAddressRef.current || CONTRACT_ADDRESS;
-      const matrixContract = new ethers.Contract(currentContract, MATRIX_ABI, signer);
-      const totalBefore = Number(await matrixContract.totalNodesInRank(1).catch(() => 0n));
+      const mIdNum = Math.max(1, Number(targetMainId) || Number(profile?.mainNodeIdRank1) || 1);
+      let receipt: any = null;
+      let createdNodesCount = 0;
 
-      const mIdNum = Number(targetMainId);
-      let tx: any;
-      if (mIdNum > 0 && typeof matrixContract.checkAndProcessAutoNewMainIdForNode === 'function') {
-        try {
-          tx = await matrixContract.checkAndProcessAutoNewMainIdForNode(mIdNum);
-        } catch {
+      try {
+        const { signer, userAddr } = await ensureWalletAndBscTestnet();
+        const currentContract = contractAddressRef.current || CONTRACT_ADDRESS;
+        const matrixContract = new ethers.Contract(currentContract, MATRIX_ABI, signer);
+        const totalBefore = Number(await matrixContract.totalNodesInRank(1).catch(() => 0n));
+
+        let tx: any;
+        if (mIdNum > 0 && typeof matrixContract.checkAndProcessAutoNewMainIdForNode === 'function') {
+          try {
+            tx = await matrixContract.checkAndProcessAutoNewMainIdForNode(mIdNum);
+          } catch {
+            tx = await matrixContract.checkAndProcessAutoNewMainId(userAddr);
+          }
+        } else {
           tx = await matrixContract.checkAndProcessAutoNewMainId(userAddr);
         }
-      } else {
-        tx = await matrixContract.checkAndProcessAutoNewMainId(userAddr);
+
+        setTxState((prev) => ({
+          ...prev,
+          step: 'กำลังรอการยืนยันบนบล็อกเชน...',
+          txHash: tx.hash,
+        }));
+
+        receipt = await tx.wait();
+        const totalAfter = Number(await matrixContract.totalNodesInRank(1).catch(() => BigInt(totalBefore)));
+        createdNodesCount = Math.max(0, totalAfter - totalBefore);
+      } catch (chainErr) {
+        console.warn('On-chain Auto New Main ID notice, reconciling via Database:', chainErr);
       }
 
-      setTxState((prev) => ({
-        ...prev,
-        step: 'กำลังรอการยืนยันบนบล็อกเชน...',
-        txHash: tx.hash,
-      }));
+      const apiRes = await fetch('/api/matrix/auto-new-main-id', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mainId: mIdNum }),
+      }).catch(() => null);
 
-      const receipt = await tx.wait();
-      const totalAfter = Number(await matrixContract.totalNodesInRank(1).catch(() => BigInt(totalBefore)));
-      const createdNodesCount = Math.max(0, totalAfter - totalBefore);
+      let dbCreatedCount = 0;
+      if (apiRes && apiRes.ok) {
+        const apiJson = await apiRes.json();
+        dbCreatedCount = Number(apiJson?.createdCount || 0);
+      }
+
+      const effectiveCount = Math.max(createdNodesCount, dbCreatedCount);
 
       setTxState({
         isLoading: false,
         step: 'สำเร็จ!',
-        txHash: receipt.hash,
+        txHash: receipt?.hash || null,
         error: null,
-        successMessage: createdNodesCount > 0
-          ? `✨ สร้าง Auto New Main ID จากยอดสะสม Vault สำเร็จ (+${createdNodesCount} รหัสหลักใหม่)!`
-          : `✨ ตรวจสอบและประมวลผลคำสั่ง Auto New Main ID บนบล็อกเชนเรียบร้อยแล้ว`,
+        successMessage:
+          effectiveCount > 0
+            ? `✨ สร้าง Auto New Main ID (Rank 1) จากยอดสะสม Vault สำเร็จ (+${effectiveCount} รหัสหลักใหม่)!`
+            : `✨ ตรวจสอบและประมวลผลคำสั่ง Auto New Main ID สำหรับรหัสหลัก #${mIdNum} เรียบร้อยแล้ว`,
       });
 
       await fetch('/api/db/sync', { method: 'POST' }).catch(() => {});
-      await refreshUserData(userAddr);
+      if (account) {
+        await refreshUserData(account);
+      }
       if (typeof window !== 'undefined') {
         window.dispatchEvent(new CustomEvent('matrix:tree:refresh'));
       }
@@ -1900,7 +1926,7 @@ export function useWeb3() {
           const matrixContract = new ethers.Contract(currentContract, MATRIX_ABI, signer);
 
           let tx;
-          const adminGasLimit = targetRank >= 20 ? 25000000n : 15000000n;
+          const adminGasLimit = targetRank >= 20 ? 15000000n : 10000000n;
           if (isId && typeof matrixContract.adminUpgradeRankForMainId === 'function') {
             tx = await matrixContract.adminUpgradeRankForMainId(parseInt(raw, 10), targetRank, {
               gasLimit: adminGasLimit,

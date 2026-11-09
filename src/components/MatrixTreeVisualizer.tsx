@@ -787,6 +787,7 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
   >('all');
   const [modalSectionPages, setModalSectionPages] = useState<Record<string, number>>({});
   const [perIdReportsMap, setPerIdReportsMap] = useState<Map<number, any>>(new Map());
+  const perIdReportsMapRef = useRef<Map<number, any>>(new Map());
   const [systemPoolsData, setSystemPoolsData] = useState<any>(null);
   const [isSystemPoolsModalOpen, setIsSystemPoolsModalOpen] = useState<boolean>(false);
   const [systemPoolsModalTab, setSystemPoolsModalTab] = useState<'all' | 'allsell' | 'family'>('all');
@@ -950,9 +951,9 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
     });
   };
 
-  const fetchPerIdHistoryForModal = useCallback(async () => {
+  const fetchPerIdHistoryForModal = useCallback(async (forceSync?: boolean) => {
     try {
-      const res = await fetch('/api/matrix/per-id-history');
+      const res = await fetch(`/api/matrix/per-id-history${forceSync ? '?forceSync=1' : ''}`);
       if (res.ok) {
         const data = await res.json();
         if (data?.success) {
@@ -961,6 +962,7 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
             for (const rep of data.reports) {
               map.set(Number(rep.id), rep);
             }
+            perIdReportsMapRef.current = map;
             setPerIdReportsMap(map);
           }
           if (data.systemPools) {
@@ -1123,6 +1125,11 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
       }
 
       try {
+        if (forceSync || !isSilent || perIdReportsMapRef.current.size === 0) {
+          await fetchPerIdHistoryForModal(forceSync);
+        } else {
+          fetchPerIdHistoryForModal(false).catch(() => {});
+        }
         const activeContract = contractAddress || CONTRACT_ADDRESS;
         let lazyContract: ethers.Contract | null = null;
         const getFallbackContract = async (): Promise<ethers.Contract> => {
@@ -2697,27 +2704,11 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
           const deducted = Math.max(0, Number((totalGross1To3 - totalRem1To3).toFixed(4)));
           const maxPossibleSpawns =
             window5Start > 1 ? Math.floor((deducted + 1e-4) / 5) : 0;
-          let spawnedCount = 0;
-          if (r1Id === 1) {
-            spawnedCount = maxPossibleSpawns;
-          } else if (perIdReportsMap.has(r1Id)) {
-            // Strictly honor authentic backend/on-chain autoId reports for Main IDs > 1 (e.g. ID #2 where vaults were spent on upgrades)
-            const rep = perIdReportsMap.get(r1Id);
-            spawnedCount = Array.isArray(rep?.autoIdsSpawned) ? rep.autoIdsSpawned.length : (rep?.totalAutoIdCount || 0);
-          } else if (maxPossibleSpawns > 0) {
-            // สำหรับ Main ID > 1 ที่ไม่ได้ใช้ยอดอัปเกรด
-            for (let c = maxPossibleSpawns; c >= 1; c--) {
-              const pool2GrossNeeded = Number((totalRem1To3 + c * 5).toFixed(4));
-              const units175 = pool2GrossNeeded / 1.75;
-              if (
-                pool2GrossNeeded <= totalGross1To3 + 0.01 &&
-                Math.abs(units175 - Math.round(units175)) < 0.01
-              ) {
-                spawnedCount = c;
-                break;
-              }
-            }
-          }
+          const rep = perIdReportsMapRef.current.get(r1Id);
+          const repSpawnedCount = Array.isArray(rep?.autoIdsSpawned)
+            ? rep.autoIdsSpawned.length
+            : Number(rep?.totalAutoIdCount || 0);
+          const spawnedCount = Math.max(maxPossibleSpawns, repSpawnedCount);
 
           crossRankGrossVault1To4.set(r1Id, totalGross1To3);
           crossRankRemVault1To4.set(r1Id, totalRem1To3);
@@ -2779,7 +2770,7 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
 
           const extraLeftVaultBonusGross = crossRankExtraLeftVaultGrossMap.get(r1Id) || 0;
           const totalExtraCostForMain = crossRankExtraCostMap.get(r1Id) || 0;
-          const repExtraBonus = perIdReportsMap.get(r1Id)?.extraLeftVaultBonus;
+          const repExtraBonus = perIdReportsMapRef.current.get(r1Id)?.extraLeftVaultBonus;
 
           let remainingExtraLeftBonus = 0;
           if (typeof repExtraBonus === 'number') {
@@ -3016,13 +3007,14 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
           const explicitSponsorId = onChainSponsorNodeMap.get(n.id) || 0;
           const isBackendTaggedAuto =
             onChainOriginTypeMap.get(n.id) === 'AUTO_NEW_MAIN' ||
-            Boolean((n as any).isSyntheticAutoMain);
+            Boolean((n as any).isSyntheticAutoMain) ||
+            Boolean(perIdReportsMapRef.current.get(n.id)?.isAutoId);
           const priorMains = (ownerAllMainNodesMap.get(ownerKey) || []).filter((mId) => {
             if (mId >= n.id) return false;
             if (getMainIdWindow5Start(mId, n.owner) <= 1) return false;
             const maxAllowedSpawns = crossRankAutoIdCount.get(mId) || 0;
             const currentSpawns = mainNodeAutoIdSpawnCount.get(mId) || 0;
-            if (currentSpawns >= maxAllowedSpawns) return false;
+            if (!isBackendTaggedAuto && currentSpawns >= maxAllowedSpawns) return false;
             // กฎเหล็กการจัดวางบนสัญญา (_findPlacementSpot): Auto ID ที่เกิดจาก mId จะต้องวางอยู่ใต้สายงาน/โคลนของ mId เท่านั้น
             // ดังนั้น R1-#3 (ซึ่งวางอยู่ใต้ #1 ฝั่งขวา ไม่ได้อยู่ใต้ #2) จะไม่มีวันถูกมองเป็น Auto ID ของ #2 เด็ดขาด
             if (!isPlacedUnderMainOrClonesActive(mId, n.id)) return false;
@@ -3053,11 +3045,15 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
               lineageAutoIdVault.set(sourceMain, Number((r1Bal + extraBal).toFixed(4)));
             }
           }
-          if (sourceMain === undefined && isBackendTaggedAuto && priorMains.length > 0) {
-            sourceMain =
-              explicitSponsorId > 0 && priorMains.includes(explicitSponsorId)
-                ? explicitSponsorId
-                : priorMains[0];
+          if (sourceMain === undefined && isBackendTaggedAuto) {
+            if (priorMains.length > 0) {
+              sourceMain =
+                explicitSponsorId > 0 && priorMains.includes(explicitSponsorId)
+                  ? explicitSponsorId
+                  : priorMains[0];
+            } else {
+              sourceMain = explicitSponsorId > 0 ? explicitSponsorId : firstMainOfOwner;
+            }
           }
 
           if (sourceMain !== undefined) {
@@ -3402,14 +3398,16 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
 
           if (!sn.isClone && !sn.isExtraId && id1 > firstMain) {
             const explicitSpId = sn.directSponsorNodeId || 0;
-            const isSnapTaggedAuto = sn.originType === 'AUTO_NEW_MAIN';
+            const isSnapTaggedAuto =
+              sn.originType === 'AUTO_NEW_MAIN' ||
+              Boolean(perIdReportsMapRef.current.get(id1)?.isAutoId);
             // กฎเหล็ก Pool 2: รหัสหลักต้นทาง (m) จะสร้าง New Auto ID ได้ก็ต่อเมื่อพ้นกรอบ 5 rank ย้อนหลังแล้วเท่านั้น (window5Start > 1 คืออยู่ตั้งแต่ Rank 6 ขึ้นไป หรือเป็น Root #1)
             const priorMains = (s1OwnerAllMains.get(oKey) || []).filter((m) => {
               if (m >= id1) return false;
               if (getMainIdWindow5Start(m, sn.owner) <= 1) return false;
               const maxAllowed = crossRankAutoIdCount.get(m) || 0;
               const curSpawns = s1AutoIdCountByMain.get(m) || 0;
-              if (curSpawns >= maxAllowed) return false;
+              if (!isSnapTaggedAuto && curSpawns >= maxAllowed) return false;
               // กฎเหล็กการจัดวางบนสัญญา (_findPlacementSpot): Auto ID ที่เกิดจาก m จะต้องวางอยู่ใต้สายงาน/โคลนของ m เท่านั้น
               if (!isPlacedUnderMainOrClones1(m, id1)) return false;
               const mSpId = snap1.get(m)?.directSponsorNodeId || 1;
@@ -3437,11 +3435,15 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
                 );
               }
             }
-            if (sourceMain === undefined && isSnapTaggedAuto && priorMains.length > 0) {
-              sourceMain =
-                explicitSpId > 0 && priorMains.includes(explicitSpId)
-                  ? explicitSpId
-                  : priorMains[0];
+            if (sourceMain === undefined && isSnapTaggedAuto) {
+              if (priorMains.length > 0) {
+                sourceMain =
+                  explicitSpId > 0 && priorMains.includes(explicitSpId)
+                    ? explicitSpId
+                    : priorMains[0];
+              } else {
+                sourceMain = explicitSpId > 0 ? explicitSpId : firstMain;
+              }
             }
             if (sourceMain !== undefined) {
               s1AutoIdSourceMap.set(id1, sourceMain);
@@ -3517,7 +3519,7 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
           const extraLeftDirect = crossRankExtraLeftDirectBonusMap.get(id1) || 0;
           const extraLeftLevel = crossRankExtraLeftLevelBonusMap.get(id1) || 0;
           const extraLeftVault = crossRankExtraLeftVaultGrossMap.get(id1) || 0;
-          const repForMain = perIdReportsMap.get(id1);
+          const repForMain = perIdReportsMapRef.current.get(id1);
 
           unifiedSummaryByR1Main.set(id1, {
             directRewardAllNodes:
@@ -3685,7 +3687,10 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
             !n.isExtraId &&
             effectiveR1MainId > 1 &&
             (s1AutoIdSourceMap.has(effectiveR1MainId) ||
-              (activeRank === 1 && autoMainNodeIds.has(n.id))),
+              (activeRank === 1 && autoMainNodeIds.has(n.id)) ||
+              onChainOriginTypeMap.get(effectiveR1MainId) === 'AUTO_NEW_MAIN' ||
+              snap1?.get(effectiveR1MainId)?.originType === 'AUTO_NEW_MAIN' ||
+              Boolean(perIdReportsMapRef.current.get(effectiveR1MainId)?.isAutoId)),
           originMainId,
           r1MainId,
           isExtraLineage: isExtraOrigin,
@@ -3702,7 +3707,9 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
           spawnedByMainId:
             s1AutoIdSourceMap.get(effectiveR1MainId) ||
             autoIdSourceMainMap.get(n.id) ||
-            undefined,
+            (snap1?.get(effectiveR1MainId)?.originType === 'AUTO_NEW_MAIN'
+              ? snap1?.get(effectiveR1MainId)?.directSponsorNodeId || 1
+              : undefined),
           directUplineNodeId,
           directRewardThisNode: nodeDirectBonusMap.get(n.id) || 0,
           unilevelRewardThisNode: nodeUnilevelBonusMap.get(n.id) || 0,
@@ -3818,7 +3825,7 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
           isExtraLineage
         );
 
-        const repForTargetMain = perIdReportsMap.get(targetMainId);
+        const repForTargetMain = perIdReportsMapRef.current.get(targetMainId);
         node.upgradeRankPool = isExtraLineage
           ? 0
           : typeof repForTargetMain?.upgradeRankPool === 'number'
@@ -7504,6 +7511,33 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
                               ยอดสะสมก่อนหัก: {grossAutoIdPool.toFixed(2)} U
                             </span>
                           )}
+                          {!isExtraOrCloneOfExtra && effectiveAutoIdPool >= 5 && (
+                            <button
+                              type="button"
+                              onClick={async () => {
+                                try {
+                                  const res = await fetch('/api/matrix/auto-new-main-id', {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({ mainId: targetMainId }),
+                                  });
+                                  const json = await res.json();
+                                  await fetchPerIdHistoryForModal(true);
+                                  await loadOnChainTree(selectedRank, { silent: false, forceSync: true });
+                                  if (json?.createdCount > 0) {
+                                    setModalUpgradeMessage(
+                                      `✨ ออก Auto ID ใหม่สำเร็จ +${json.createdCount} รหัส ใน Rank 1!`
+                                    );
+                                  }
+                                } catch (e: any) {
+                                  setModalUpgradeError(e?.message || 'ไม่สามารถออก Auto ID ได้');
+                                }
+                              }}
+                              className="mt-1 w-full py-1 px-1.5 rounded bg-yellow-500 hover:bg-yellow-400 text-slate-950 font-extrabold text-[9.5px] transition cursor-pointer"
+                            >
+                              ⚡ กดออก Auto ID ทันที
+                            </button>
+                          )}
                         </div>
                         <div className="bg-slate-950/90 border border-rose-500/30 rounded p-1.5 text-center space-y-0.5">
                           <span className="text-slate-400 block">Extra ID Pool (รวมยอดเก่า)</span>
@@ -7540,6 +7574,33 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
                             <span className="text-amber-200 font-semibold text-[9px] block font-mono">
                               รวมยอดเก่าก่อนหัก: {grossExtraIdPool.toFixed(2)} U
                             </span>
+                          )}
+                          {!isExtraOrCloneOfExtra && effectiveExtraIdPool >= 10 && (
+                            <button
+                              type="button"
+                              onClick={async () => {
+                                try {
+                                  const res = await fetch('/api/matrix/auto-extra-id', {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({ mainId: targetMainId }),
+                                  });
+                                  const json = await res.json();
+                                  await fetchPerIdHistoryForModal(true);
+                                  await loadOnChainTree(selectedRank, { silent: false, forceSync: true });
+                                  if (json?.createdCount > 0) {
+                                    setModalUpgradeMessage(
+                                      `✨ ออก Extra ID ใหม่สำเร็จ +${json.createdCount} รหัส!`
+                                    );
+                                  }
+                                } catch (e: any) {
+                                  setModalUpgradeError(e?.message || 'ไม่สามารถออก Extra ID ได้');
+                                }
+                              }}
+                              className="mt-1 w-full py-1 px-1.5 rounded bg-rose-500 hover:bg-rose-400 text-white font-extrabold text-[9.5px] transition cursor-pointer"
+                            >
+                              ⚡ กดออก Extra ID ทันที
+                            </button>
                           )}
                         </div>
                       </div>
