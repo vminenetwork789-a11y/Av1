@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { RANK_PRICES_USDT } from '../contracts/config';
 import { Calculator, Sparkles, ArrowRight, Layers, CheckCircle2, RotateCcw, Zap, Bot } from 'lucide-react';
 
@@ -537,7 +537,7 @@ export function calculateMatrixUpgradePath(
     stepChainEvents: ChainReactionEvent[],
     depth = 0
   ) => {
-    if (depth > 25) return;
+    if (depth > 200) return;
     const snapR = simRanks.get(rank)!;
     const parentNode = snapR.get(parentId);
     if (!parentNode) return;
@@ -603,9 +603,12 @@ export function calculateMatrixUpgradePath(
     } else {
       // Right child triggers 100% Rebirth Clone of parent's origin node
       const originR1Main = resolveR1MainForNode(rank, parentNode.id);
+      const directParentOrig = parentNode.originMainId > 0 ? snapR.get(parentNode.originMainId) : undefined;
       const localCorrespId =
         !parentNode.isClone
           ? parentNode.id
+          : directParentOrig && !directParentOrig.isClone && directParentOrig.isExtraId
+          ? directParentOrig.id
           : getCorrespondingNodeInRank(originR1Main, rank) || parentNode.originMainId || parentNode.id;
       const originNode = snapR.get(localCorrespId) || parentNode;
 
@@ -701,7 +704,7 @@ export function calculateMatrixUpgradePath(
     stepChainEvents: ChainReactionEvent[],
     depth: number
   ) => {
-    if (depth > 25) return;
+    if (depth > 200) return;
     const curRank = getMainCurrentRank(r1Main);
     const [w5Start] = getFiveRankWindow(curRank);
     if (w5Start <= 1) return;
@@ -759,7 +762,7 @@ export function calculateMatrixUpgradePath(
     stepChainEvents: ChainReactionEvent[],
     depth: number
   ) => {
-    if (depth > 25) return;
+    if (depth > 200) return;
     const mNode = r1Map.get(r1Main);
     if (!mNode) return;
 
@@ -994,6 +997,12 @@ export const ExtraIdPathCalculator: React.FC<ExtraIdPathCalculatorProps> = ({
     [multiRankSnapshots, targetMainId, prospectiveRank, perIdReportsMap]
   );
 
+  useEffect(() => {
+    if (calculation.currentOnChainRank >= 1 && prospectiveRank <= calculation.currentOnChainRank && calculation.currentOnChainRank < 27) {
+      setProspectiveRank(calculation.currentOnChainRank + 1);
+    }
+  }, [calculation.currentOnChainRank, prospectiveRank]);
+
   const handleSelectMainId = (newId: number) => {
     const safeId = Math.max(1, Math.floor(newId || 2));
     setTargetMainId(safeId);
@@ -1129,14 +1138,21 @@ export const ExtraIdPathCalculator: React.FC<ExtraIdPathCalculatorProps> = ({
           type="button"
           onClick={() => {
             setTargetMainId(2);
-            setProspectiveRank(10);
+            let maxR2 = 1;
+            for (let r = 2; r <= 27; r++) {
+              const snap = multiRankSnapshots.get(r);
+              if (snap && Array.from(snap.values()).some((n) => !n.isClone && !n.isExtraId && n.originMainId === 2)) {
+                maxR2 = r;
+              }
+            }
+            setProspectiveRank(maxR2 >= 10 ? Math.min(27, maxR2 + 1) : 10);
             setTypeFilter('ALL');
             setOwnerFilter('ALL');
           }}
           className="px-3 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-700 text-xs font-medium text-slate-300 flex items-center gap-1.5 self-start sm:self-auto cursor-pointer transition"
         >
           <RotateCcw className="w-3.5 h-3.5 text-slate-400" />
-          <span>รีเซ็ตค่าเริ่มต้น (ID #2 → R10)</span>
+          <span>รีเซ็ตค่าเริ่มต้น (ID #2 → R{calculation.targetMainId === 2 && calculation.currentOnChainRank >= 10 ? Math.min(27, calculation.currentOnChainRank + 1) : 10})</span>
         </button>
       </div>
 
@@ -1584,21 +1600,29 @@ export const ExtraIdPathCalculator: React.FC<ExtraIdPathCalculatorProps> = ({
                                       </span>
                                       <span className="text-rose-300 font-bold">-{ex.deductedUsdt.toFixed(2)} U</span>
                                     </div>
-                                    <div className="text-[11px] text-slate-300">
-                                      โหนดใหม่:{' '}
-                                      <strong className="text-white">
-                                        R{ex.spawnedInRank}-#{ex.newNodeId}
-                                      </strong>{' '}
-                                      วางใต้{' '}
-                                      <button
-                                        type="button"
-                                        onClick={() => onSelectRankAndNode?.(ex.spawnedInRank, ex.parentId)}
-                                        className="text-indigo-300 hover:underline font-bold cursor-pointer"
-                                      >
-                                        R{ex.spawnedInRank}-#{ex.parentId}
-                                      </button>{' '}
-                                      ({ex.side === 'LEFT' ? '↙ซ้าย' : '↘ขวา'})
-                                    </div>
+                                      <div className="text-[11px] text-slate-300">
+                                        โหนดใหม่:{' '}
+                                        <strong className="text-white">
+                                          Extra R{ex.spawnedInRank}-#{ex.newNodeId}
+                                        </strong>{' '}
+                                        วางใต้{' '}
+                                        <button
+                                          type="button"
+                                          onClick={() => onSelectRankAndNode?.(ex.spawnedInRank, ex.parentId)}
+                                          className="text-indigo-300 hover:underline font-bold cursor-pointer"
+                                        >
+                                          {multiRankSnapshots.get(ex.spawnedInRank)?.get(ex.parentId)?.isExtraId ||
+                                          allGeneratedItems.some(
+                                            (g) =>
+                                              g.category === 'EXTRA_ID' &&
+                                              g.spawnedInRank === ex.spawnedInRank &&
+                                              g.newNodeId === ex.parentId
+                                          )
+                                            ? `Extra R${ex.spawnedInRank}-#${ex.parentId}`
+                                            : `R${ex.spawnedInRank}-#${ex.parentId}`}
+                                        </button>{' '}
+                                        ({ex.side === 'LEFT' ? '↙ซ้าย' : '↘ขวา'})
+                                      </div>
                                     <div className="text-[10px] text-slate-400">
                                       {ex.triggeredByNote} → คงเหลือขณะนั้น {ex.poolAfterUsdt.toFixed(2)} U
                                       {isLastExtraForOwner && Math.abs(subsequentGains) > 0.001 && (
@@ -1921,7 +1945,13 @@ export const ExtraIdPathCalculator: React.FC<ExtraIdPathCalculatorProps> = ({
                                 className="text-indigo-300 hover:underline font-bold cursor-pointer"
                                 title={`คลิกเพื่อดูผัง Rank ${item.spawnedInRank} ที่โหนด #${item.parentId}`}
                               >
-                                {multiRankSnapshots.get(item.spawnedInRank)?.get(item.parentId)?.isExtraId
+                                {multiRankSnapshots.get(item.spawnedInRank)?.get(item.parentId)?.isExtraId ||
+                                allGeneratedItems.some(
+                                  (g) =>
+                                    g.category === 'EXTRA_ID' &&
+                                    g.spawnedInRank === item.spawnedInRank &&
+                                    g.newNodeId === item.parentId
+                                )
                                   ? `Extra R${item.spawnedInRank}-#${item.parentId}`
                                   : `R${item.spawnedInRank}-#${item.parentId}`}
                               </button>
