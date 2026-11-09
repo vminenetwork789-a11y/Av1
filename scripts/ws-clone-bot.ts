@@ -30,7 +30,7 @@ const CONTRACT_ADDRESS =
   process.env.OVERRIDE_CONTRACT_ADDRESS ||
   process.env.CONTRACT_ADDRESS ||
   process.env.VITE_CONTRACT_ADDRESS ||
-  '0xda9dA3B56b75F5D59aC0b17B402e79Dd3DdDFFba';
+  '0x05cf73c0B412e17FAC31305936d25A7fa1622771';
 
 const WSS_ENDPOINTS = [
   process.env.WSS_URL || 'wss://bsc-testnet-rpc.publicnode.com',
