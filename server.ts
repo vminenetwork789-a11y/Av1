@@ -205,6 +205,7 @@ const DEFAULT_SYSTEM_CONFIG = {
     process.env.OVERRIDE_CONTRACT_ADDRESS ||
     process.env.CONTRACT_ADDRESS ||
     '0x05cf73c0B412e17FAC31305936d25A7fa1622771',
+  buildDefaultContract: '0x05cf73c0B412e17FAC31305936d25A7fa1622771',
   usdtAddress: process.env.USDT_ADDRESS || '0x05f24E1F598DF1aE8d0B424ce978f8ea33bB752b',
   chainId: Number(process.env.CHAIN_ID || 97),
   networkName: process.env.NETWORK_NAME || 'BNB Smart Chain Testnet',
@@ -421,19 +422,36 @@ function readContractConfigFromDB() {
       const raw = fs.readFileSync(CONFIG_FILE_PATH, 'utf8');
       const parsed = JSON.parse(raw);
       if (parsed.contractAddress && ethers.isAddress(parsed.contractAddress)) {
-        if (SERVER_LEGACY_CONTRACTS.has(parsed.contractAddress.toLowerCase())) {
+        let shouldPersistMigrate = false;
+        if (
+          SERVER_LEGACY_CONTRACTS.has(parsed.contractAddress.toLowerCase()) ||
+          !parsed.buildDefaultContract ||
+          parsed.buildDefaultContract.toLowerCase() !== DEFAULT_SYSTEM_CONFIG.contractAddress.toLowerCase()
+        ) {
           parsed.contractAddress = DEFAULT_SYSTEM_CONFIG.contractAddress;
+          parsed.buildDefaultContract = DEFAULT_SYSTEM_CONFIG.contractAddress;
+          shouldPersistMigrate = true;
         }
         if (parsed.usdtAddress && SERVER_LEGACY_USDT.has(parsed.usdtAddress.toLowerCase())) {
           parsed.usdtAddress = DEFAULT_SYSTEM_CONFIG.usdtAddress;
+          shouldPersistMigrate = true;
         }
         if (
           parsed.rpcUrl === 'https://data-seed-prebsc-1-s1.binance.org:8545/' &&
           !process.env.RPC_URL
         ) {
           parsed.rpcUrl = 'https://bsc-testnet-rpc.publicnode.com';
+          shouldPersistMigrate = true;
         }
-        return { ...DEFAULT_SYSTEM_CONFIG, ...parsed };
+        const merged = { ...DEFAULT_SYSTEM_CONFIG, ...parsed };
+        if (shouldPersistMigrate) {
+          try {
+            fs.writeFileSync(CONFIG_FILE_PATH, JSON.stringify(merged, null, 2), 'utf8');
+          } catch {
+            // Non-blocking
+          }
+        }
+        return merged;
       }
     }
   } catch (err) {
@@ -3830,11 +3848,16 @@ async function getQueueStatus(): Promise<QueueStats> {
 
 async function startApp() {
   const app = express();
+  app.set('etag', false);
   app.use(express.json());
   app.use(cors());
 
   app.use('/api', (_req: Request, res: Response, next) => {
     res.setHeader('Content-Type', 'application/json');
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+    res.setHeader('Surrogate-Control', 'no-store');
     next();
   });
 
@@ -4178,21 +4201,25 @@ async function startApp() {
         );
 
         const maxFetch = Math.max(totalNodes, 1);
-        const mergedMap = new Map<number, IndexedTreeNode>();
-        for (const existing of realExisting) {
-          if (existing && existing.id > 0 && existing.id <= totalNodes && !existing.isLocalUpgrade) {
-            const copy = { ...existing };
-            if (copy.leftChild > maxFetch) copy.leftChild = 0;
-            if (copy.rightChild > maxFetch) copy.rightChild = 0;
-            mergedMap.set(copy.id, copy);
-          }
-        }
-
-        // Determine which node IDs need to be fetched (all if forceRefresh, or when missing/incomplete)
         const maxExistingChainId = realExisting.reduce(
           (m, n) => (!n.isLocalUpgrade ? Math.max(m, n.id) : m),
           0
         );
+        const isChainTruncatedOrReset = maxExistingChainId > totalNodes;
+
+        const mergedMap = new Map<number, IndexedTreeNode>();
+        if (!isChainTruncatedOrReset) {
+          for (const existing of realExisting) {
+            if (existing && existing.id > 0 && existing.id <= totalNodes && !existing.isLocalUpgrade) {
+              const copy = { ...existing };
+              if (copy.leftChild > maxFetch) copy.leftChild = 0;
+              if (copy.rightChild > maxFetch) copy.rightChild = 0;
+              mergedMap.set(copy.id, copy);
+            }
+          }
+        }
+
+        // Determine which node IDs need to be fetched (all if forceRefresh/reset, or when missing/incomplete)
         const idsToFetch: number[] = [];
         for (let i = 1; i <= maxFetch; i++) {
           const ex = mergedMap.get(i);
@@ -4200,7 +4227,7 @@ async function startApp() {
             ex &&
             ((ex.isClone && (!ex.originMainId || ex.originMainId === ex.id)) ||
               (rankNum > 1 && i > 1 && !ex.isClone && !ex.isExtraId && (!ex.originMainId || ex.originMainId <= 1)));
-          if (forceRefresh || !ex || needsMetadataRefresh) {
+          if (forceRefresh || isChainTruncatedOrReset || !ex || needsMetadataRefresh) {
             idsToFetch.push(i);
           }
         }

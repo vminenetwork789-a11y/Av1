@@ -1,5 +1,5 @@
-import React from 'react';
-import { CONTRACT_ADDRESS } from '../contracts/config';
+import React, { useState } from 'react';
+import { CONTRACT_ADDRESS, clearDynamicContractConfig } from '../contracts/config';
 import {
   ExternalLink,
   Wallet,
@@ -9,6 +9,7 @@ import {
   Zap,
   LogOut,
   Shield,
+  Trash2,
 } from 'lucide-react';
 
 interface HeaderProps {
@@ -45,6 +46,9 @@ export const Header: React.FC<HeaderProps> = ({
   isAdminView = false,
   onToggleAdminView,
 }) => {
+  const [isClearingCache, setIsClearingCache] = useState(false);
+  const [cacheClearedDone, setCacheClearedDone] = useState(false);
+
   const shortAddress = account
     ? `${account.substring(0, 6)}...${account.substring(account.length - 4)}`
     : '';
@@ -52,6 +56,47 @@ export const Header: React.FC<HeaderProps> = ({
   const shortContract = `${currentContract.substring(0, 6)}...${currentContract.substring(
     currentContract.length - 4
   )}`;
+
+  const handleClearCacheAndResync = async () => {
+    if (isClearingCache) return;
+    setIsClearingCache(true);
+    setCacheClearedDone(false);
+    try {
+      // 1. Clear browser localStorage stale contract/cache keys
+      if (typeof window !== 'undefined') {
+        try {
+          clearDynamicContractConfig();
+          localStorage.removeItem('F27_BUILD_DEFAULT_CONTRACT');
+        } catch {
+          // ignore
+        }
+        if ('caches' in window) {
+          try {
+            const keys = await window.caches.keys();
+            await Promise.all(keys.map((k) => window.caches.delete(k)));
+          } catch {
+            // ignore
+          }
+        }
+      }
+
+      // 2. Clear server-side matrix-db.json cache and force full 27-rank blockchain resync
+      await fetch('/api/admin/clear-cache', {
+        method: 'POST',
+        headers: { 'Cache-Control': 'no-cache, no-store' },
+      }).catch(() => {});
+
+      // 3. Refresh frontend user profile & tree visualizer
+      onRefresh();
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('matrix:tree:refresh'));
+      }
+      setCacheClearedDone(true);
+      setTimeout(() => setCacheClearedDone(false), 3000);
+    } finally {
+      setIsClearingCache(false);
+    }
+  };
 
   return (
     <header className="w-full bg-slate-900/95 backdrop-blur-md border-b border-slate-800/90 sticky top-0 z-40">
@@ -98,8 +143,37 @@ export const Header: React.FC<HeaderProps> = ({
               </div>
             </div>
 
-            {/* Mobile-only quick language & refresh controls on top-right */}
+            {/* Mobile-only quick clear-cache, refresh & language controls on top-right */}
             <div className="flex md:hidden items-center gap-1.5 shrink-0">
+              <button
+                onClick={handleClearCacheAndResync}
+                disabled={isClearingCache}
+                className={`px-2 py-1.5 rounded-xl border text-[10px] font-semibold inline-flex items-center gap-1 transition cursor-pointer ${
+                  cacheClearedDone
+                    ? 'bg-emerald-500/20 border-emerald-500/40 text-emerald-300'
+                    : 'bg-rose-500/15 hover:bg-rose-500/25 border-rose-500/30 text-rose-300'
+                }`}
+                title={
+                  language === 'th'
+                    ? 'ล้างแคชเบราว์เซอร์และดึงข้อมูลสดจาก Smart Contract ใหม่'
+                    : 'Clear cache and force resync from Smart Contract'
+                }
+              >
+                {isClearingCache ? (
+                  <RefreshCw className="w-3 h-3 animate-spin" />
+                ) : (
+                  <Trash2 className="w-3 h-3" />
+                )}
+                <span>
+                  {cacheClearedDone
+                    ? language === 'th'
+                      ? 'ล้างแล้ว!'
+                      : 'Cleared!'
+                    : language === 'th'
+                    ? 'ล้างแคช'
+                    : 'Clear Cache'}
+                </span>
+              </button>
               {account && (
                 <button
                   onClick={onRefresh}
@@ -157,6 +231,41 @@ export const Header: React.FC<HeaderProps> = ({
               >
                 <Zap className="w-3.5 h-3.5 text-amber-400 shrink-0" />
                 <span>{language === 'th' ? 'Deploy สัญญา' : 'Deploy Contract'}</span>
+              </button>
+
+              {/* Desktop 1-Click Clear Cache & Resync Button */}
+              <button
+                onClick={handleClearCacheAndResync}
+                disabled={isClearingCache}
+                className={`hidden md:inline-flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-xl font-semibold border transition whitespace-nowrap shrink-0 cursor-pointer ${
+                  cacheClearedDone
+                    ? 'bg-emerald-500/20 border-emerald-500/40 text-emerald-300'
+                    : 'bg-rose-500/15 hover:bg-rose-500/25 border-rose-500/30 text-rose-300 hover:text-rose-200'
+                }`}
+                title={
+                  language === 'th'
+                    ? 'ล้างแคชเบราว์เซอร์ + ล้างแคชฐานข้อมูลเซิร์ฟเวอร์ และดึงข้อมูลสดจาก Smart Contract ใหม่ครบ 27 แรงค์'
+                    : 'Clear browser & server cache and resync all 27 ranks from Smart Contract'
+                }
+              >
+                {isClearingCache ? (
+                  <RefreshCw className="w-3.5 h-3.5 animate-spin shrink-0" />
+                ) : (
+                  <Trash2 className="w-3.5 h-3.5 shrink-0" />
+                )}
+                <span>
+                  {isClearingCache
+                    ? language === 'th'
+                      ? 'กำลังล้างแคช...'
+                      : 'Clearing...'
+                    : cacheClearedDone
+                    ? language === 'th'
+                      ? 'ล้างแคชสำเร็จ!'
+                      : 'Cache Cleared!'
+                    : language === 'th'
+                    ? 'ล้างแคช'
+                    : 'Clear Cache'}
+                </span>
               </button>
 
               {/* Desktop Language Switch */}
