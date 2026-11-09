@@ -216,6 +216,7 @@ export function calculateMatrixUpgradePath(
 
   const getCorrespondingNodeInRank = (r1Main: number, rank: number): number => {
     if (rank === 1) return r1Main;
+    if (r1Main === 1) return 1;
     const snapR = simRanks.get(rank);
     if (!snapR) return 0;
     for (const n of snapR.values()) {
@@ -223,18 +224,7 @@ export function calculateMatrixUpgradePath(
         return n.id;
       }
     }
-    const r1Node = r1Map.get(r1Main);
-    if (!r1Node) return 0;
-    const ownerLow = r1Node.owner.toLowerCase();
-    const r1MainsOfOwner = Array.from(r1Map.values())
-      .filter((x) => !x.isClone && !x.isExtraId && x.owner.toLowerCase() === ownerLow)
-      .sort((a, b) => a.id - b.id);
-    const idx = r1MainsOfOwner.findIndex((x) => x.id === r1Main);
-    if (idx < 0) return 0;
-    const rMainsOfOwner = Array.from(snapR.values())
-      .filter((x) => !x.isClone && !x.isExtraId && x.owner.toLowerCase() === ownerLow)
-      .sort((a, b) => a.id - b.id);
-    return idx < rMainsOfOwner.length ? rMainsOfOwner[idx].id : 0;
+    return 0;
   };
 
   const resolveR1MainForNode = (rank: number, nodeId: number): number => {
@@ -247,20 +237,27 @@ export function calculateMatrixUpgradePath(
     }
     const orig = n.originMainId > 0 ? n.originMainId : n.id;
     if (rank === 1) return orig;
+    if (!n.isClone && n.originMainId > 0) {
+      return n.originMainId;
+    }
+    const localOriginNode = snapR?.get(orig);
+    if (
+      localOriginNode &&
+      !localOriginNode.isClone &&
+      localOriginNode.owner.toLowerCase() === n.owner.toLowerCase()
+    ) {
+      if (localOriginNode.isExtraId) {
+        return localOriginNode.directSponsorNodeId > 0 ? localOriginNode.directSponsorNodeId : 1;
+      }
+      if (localOriginNode.originMainId > 0) {
+        return localOriginNode.originMainId;
+      }
+    }
     if (r1Map.has(orig) && !r1Map.get(orig)!.isClone) {
       const candOwner = r1Map.get(orig)!.owner.toLowerCase();
       if (candOwner === n.owner.toLowerCase()) return orig;
     }
-    const ownerLow = n.owner.toLowerCase();
-    const rMains = Array.from(snapR!.values())
-      .filter((x) => !x.isClone && !x.isExtraId && x.owner.toLowerCase() === ownerLow)
-      .sort((a, b) => a.id - b.id);
-    const idx = rMains.findIndex((x) => x.id === orig || x.id === n.id);
-    const r1Mains = Array.from(r1Map.values())
-      .filter((x) => !x.isClone && !x.isExtraId && x.owner.toLowerCase() === ownerLow)
-      .sort((a, b) => a.id - b.id);
-    if (idx >= 0 && idx < r1Mains.length) return r1Mains[idx].id;
-    return r1Mains[0]?.id || 1;
+    return orig || 1;
   };
 
   const getMainCurrentRank = (r1Main: number): number => {
@@ -664,6 +661,10 @@ export function calculateMatrixUpgradePath(
       );
       cloneNode.cloneRound = roundIdx + 1;
 
+      const cloneParentNode = snapR.get(cloneSpot.parentId);
+      const cloneParentLabel = cloneParentNode?.isExtraId
+        ? `Extra R${rank}-#${cloneSpot.parentId}`
+        : `R${rank}-#${cloneSpot.parentId}`;
       const roundLabel =
         roundIdx === 0
           ? sponsorTargetInRank > 0
@@ -677,7 +678,7 @@ export function calculateMatrixUpgradePath(
         ownerMainId: originR1Main,
         parentId: cloneSpot.parentId,
         side: cloneSpot.isLeft ? 'LEFT' : 'RIGHT',
-        descriptionTh: `R${rank}-#${parentId} ครบซ้าย-ขวา → เด้งโคลน R${rank}-#${cloneNode.id} (ของ Main #${originR1Main} • ${roundLabel}) ไปวางใต้ R${rank}-#${cloneSpot.parentId} (${cloneSpot.isLeft ? 'ซ้าย' : 'ขวา'})`,
+        descriptionTh: `R${rank}-#${parentId} ครบซ้าย-ขวา → เด้งโคลน R${rank}-#${cloneNode.id} (ของ Main #${originR1Main} • ${roundLabel}) ไปวางใต้ ${cloneParentLabel} (${cloneSpot.isLeft ? 'ซ้าย' : 'ขวา'})`,
       });
 
       processNodePlacementCascade(
@@ -1680,7 +1681,9 @@ export const ExtraIdPathCalculator: React.FC<ExtraIdPathCalculatorProps> = ({
                                       onClick={() => onSelectRankAndNode?.(ce.rank, ce.parentId)}
                                       className="text-indigo-300 hover:underline font-bold cursor-pointer"
                                     >
-                                      R{ce.rank}-#{ce.parentId}
+                                      {multiRankSnapshots.get(ce.rank)?.get(ce.parentId)?.isExtraId
+                                        ? `Extra R${ce.rank}-#${ce.parentId}`
+                                        : `R${ce.rank}-#${ce.parentId}`}
                                     </button>{' '}
                                     ({ce.side === 'LEFT' ? '↙ซ้าย' : '↘ขวา'})
                                   </div>
@@ -1863,13 +1866,21 @@ export const ExtraIdPathCalculator: React.FC<ExtraIdPathCalculatorProps> = ({
                         <td className="py-2.5 px-3 whitespace-nowrap">
                           <span
                             className={`font-bold ${
-                              item.ownerMainId === calculation.sponsorMainId ? 'text-fuchsia-300' : 'text-cyan-300'
+                              item.ownerMainId === calculation.sponsorMainId
+                                ? 'text-fuchsia-300'
+                                : item.ownerMainId === calculation.targetMainId
+                                ? 'text-cyan-300'
+                                : 'text-emerald-300'
                             }`}
                           >
                             Main ID #{item.ownerMainId}
                           </span>
                           <span className="text-[10px] text-slate-400 font-normal ml-1">
-                            ({item.ownerMainId === calculation.sponsorMainId ? 'Sponsor' : 'Target'})
+                            ({item.ownerMainId === calculation.sponsorMainId
+                              ? 'Sponsor'
+                              : item.ownerMainId === calculation.targetMainId
+                              ? 'Target'
+                              : 'ในผัง'})
                           </span>
                         </td>
 
@@ -1910,7 +1921,9 @@ export const ExtraIdPathCalculator: React.FC<ExtraIdPathCalculatorProps> = ({
                                 className="text-indigo-300 hover:underline font-bold cursor-pointer"
                                 title={`คลิกเพื่อดูผัง Rank ${item.spawnedInRank} ที่โหนด #${item.parentId}`}
                               >
-                                R{item.spawnedInRank}-#{item.parentId}
+                                {multiRankSnapshots.get(item.spawnedInRank)?.get(item.parentId)?.isExtraId
+                                  ? `Extra R${item.spawnedInRank}-#${item.parentId}`
+                                  : `R${item.spawnedInRank}-#${item.parentId}`}
                               </button>
                             </div>
                             <div
