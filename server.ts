@@ -204,8 +204,8 @@ const DEFAULT_SYSTEM_CONFIG = {
   contractAddress:
     process.env.OVERRIDE_CONTRACT_ADDRESS ||
     process.env.CONTRACT_ADDRESS ||
-    '0x05cf73c0B412e17FAC31305936d25A7fa1622771',
-  buildDefaultContract: '0x05cf73c0B412e17FAC31305936d25A7fa1622771',
+    '0xED264d4CF339DdC19a0D28206a5f3aed0e1ebB3e',
+  buildDefaultContract: '0xED264d4CF339DdC19a0D28206a5f3aed0e1ebB3e',
   usdtAddress: process.env.USDT_ADDRESS || '0x05f24E1F598DF1aE8d0B424ce978f8ea33bB752b',
   chainId: Number(process.env.CHAIN_ID || 97),
   networkName: process.env.NETWORK_NAME || 'BNB Smart Chain Testnet',

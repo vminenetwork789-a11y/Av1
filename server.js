@@ -191,8 +191,7 @@ var SERVER_LEGACY_CONTRACTS = /* @__PURE__ */ new Set([
   "0xee087e0318a8ac20229892bbc63d2fe43809234d",
   "0x982a87f726cc1044a546fa853a425e6f445bca3d",
   "0x3b69efbd1f615cd31e326497555bfa56a194f935",
-  "0xda9da3b56b75f5d59ac0b17b402e79dd3dddffba",
-  "0x05cf73c0b412e17fac31305936d25a7fa1622771"
+  "0xda9da3b56b75f5d59ac0b17b402e79dd3dddffba"
 ]);
 var SERVER_LEGACY_USDT = /* @__PURE__ */ new Set([
   "0x95856be9c16afc9c147c034cd6a514d730bd90ba"
