@@ -1246,7 +1246,7 @@ function reconcileRankTreeLinks(nodes) {
             sponsorNodeInRankId = 1;
           } else {
             const spNodeInR = placedNodes.find(
-              (p) => !p.isClone && !p.isExtraId && (savedSponsorId === 1 ? p.id === 1 : p.id === savedSponsorId || p.originMainId === savedSponsorId)
+              (p) => !p.isClone && !p.isExtraId && (savedSponsorId === 1 ? p.id === 1 : rankNum === 1 ? p.id === savedSponsorId : p.originMainId === savedSponsorId)
             );
             sponsorNodeInRankId = spNodeInR ? spNodeInR.id : 0;
           }
@@ -1294,7 +1294,7 @@ function reconcileRankTreeLinks(nodes) {
         n.rightChild = 0;
         const spMainId = n.directSponsorNodeId > 0 ? n.directSponsorNodeId : 1;
         const spNodeInRank = placedNodes.find(
-          (p) => !p.isClone && !p.isExtraId && (spMainId === 1 ? p.id === 1 : p.id === spMainId || p.originMainId === spMainId)
+          (p) => !p.isClone && !p.isExtraId && (spMainId === 1 ? p.id === 1 : rankNum === 1 ? p.id === spMainId : p.originMainId === spMainId)
         );
         const slot = spNodeInRank ? findExtraIdPlacementInRankNodes(placedNodes, spNodeInRank.id) : findShallowestLeftToRightSlotInRankNodes(placedNodes, 1);
         const targetParent = placedNodes.find((p) => p.id === slot.parentId) || rootNode;

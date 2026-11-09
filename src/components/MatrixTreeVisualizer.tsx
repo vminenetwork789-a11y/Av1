@@ -1748,7 +1748,9 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
                     !p.isExtraId &&
                     (savedSponsorId === 1
                       ? p.id === 1
-                      : p.id === savedSponsorId || p.originMainId === savedSponsorId)
+                      : rNum === 1
+                      ? p.id === savedSponsorId
+                      : p.originMainId === savedSponsorId)
                 );
                 sponsorNodeInRankId = spNodeInR ? spNodeInR.id : 0;
               }
@@ -1805,7 +1807,11 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
               (p) =>
                 !p.isClone &&
                 !p.isExtraId &&
-                (spMainId === 1 ? p.id === 1 : p.id === spMainId || p.originMainId === spMainId)
+                (spMainId === 1
+                  ? p.id === 1
+                  : rNum === 1
+                  ? p.id === spMainId
+                  : p.originMainId === spMainId)
             );
             const slot = spNodeInRank ? findSponsorSlot(spNodeInRank.id) : findBfsSlot(1);
             const targetParent = placedMap.get(slot.parentId) || rootSnap;

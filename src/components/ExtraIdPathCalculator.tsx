@@ -453,7 +453,11 @@ export function calculateMatrixUpgradePath(
     isExtra: boolean
   ): { parentId: number; isLeft: boolean } => {
     const snapR = simRanks.get(rank)!;
-    let primaryNodeId = sponsorNodeId > 0 && snapR.has(sponsorNodeId) ? sponsorNodeId : 1;
+    // หากผู้แนะนำตรงยังไม่ได้ขึ้นมาระดับ Rank นี้ (sponsorNodeId <= 0) ให้ไปต่อใครก็ได้ชั้นที่ตื้นที่สุด ซ้ายไปขวา (BFS จาก Root #1)
+    if (sponsorNodeId <= 0 || !snapR.has(sponsorNodeId)) {
+      return findFirstAvailableUnder(rank, 1);
+    }
+    let primaryNodeId = sponsorNodeId;
     const primaryNode = snapR.get(primaryNodeId)!;
     const originTag = primaryNode.originMainId > 0 ? primaryNode.originMainId : primaryNodeId;
     if (!isExtra && rank === 1 && snapR.has(originTag)) {
@@ -621,25 +625,28 @@ export function calculateMatrixUpgradePath(
       rCounts.set(cloneOriginId, curClonesCount + 1);
       originNode.totalClonesSpawned = curClonesCount + 1;
 
-      let sponsorTargetInRank = 1;
+      let sponsorTargetInRank = 0;
       let lockedR1SponsorId = originNode.directSponsorNodeId || 1;
       let lockedR1SponsorAddr = originNode.directSponsor;
-      if (originNode.isExtraId) {
+      if (originR1Main === 1 || parentNode.id === 1) {
+        lockedR1SponsorId = 0;
+        sponsorTargetInRank = 1;
+      } else if (originNode.isExtraId) {
         const spMain = originNode.directSponsorNodeId > 0 ? originNode.directSponsorNodeId : 1;
         lockedR1SponsorId = spMain;
-        sponsorTargetInRank = getCorrespondingNodeInRank(spMain, rank) || 1;
+        sponsorTargetInRank = rank === 1 ? spMain : getCorrespondingNodeInRank(spMain, rank);
       } else {
         const r1OrigNode = r1Map.get(originR1Main);
         const r1SpId = r1OrigNode?.directSponsorNodeId || 1;
-        lockedR1SponsorId = originR1Main === 1 ? 0 : r1SpId;
+        lockedR1SponsorId = r1SpId;
         if (r1OrigNode?.directSponsor) {
           lockedR1SponsorAddr = r1OrigNode.directSponsor;
         }
-        sponsorTargetInRank = getCorrespondingNodeInRank(r1SpId, rank) || 1;
+        sponsorTargetInRank = rank === 1 ? r1SpId : getCorrespondingNodeInRank(r1SpId, rank);
       }
 
       const cloneSpot =
-        roundIdx === 0
+        roundIdx === 0 && sponsorTargetInRank > 0
           ? findPlacementSpot(rank, sponsorTargetInRank, false)
           : findFirstAvailableUnder(rank, 1);
 
@@ -657,7 +664,12 @@ export function calculateMatrixUpgradePath(
       );
       cloneNode.cloneRound = roundIdx + 1;
 
-      const roundLabel = roundIdx === 0 ? 'รอบ 1 (ติดผู้แนะนำ)' : 'รอบ 2 (ผังรวม BFS)';
+      const roundLabel =
+        roundIdx === 0
+          ? sponsorTargetInRank > 0
+            ? 'รอบ 1 (ติดผู้แนะนำ)'
+            : `รอบ 1 (ผู้แนะนำ #${lockedR1SponsorId} ยังไม่ขึ้น R${rank} → ผังรวม BFS ซ้ายไปขวา)`
+          : 'รอบ 2 (ผังรวม BFS)';
       stepChainEvents.push({
         type: 'CLONE',
         rank,
@@ -832,7 +844,7 @@ export function calculateMatrixUpgradePath(
     const sponsorExtraBefore = calcExtraIdPool(sponsorMainId);
     const targetExtraBefore = calcExtraIdPool(targetMainId);
 
-    const sponsorNodeInRank = getCorrespondingNodeInRank(sponsorMainId, r) || 1;
+    const sponsorNodeInRank = getCorrespondingNodeInRank(sponsorMainId, r);
     const spot = findPlacementSpot(r, sponsorNodeInRank, false);
     const parentNodeBefore = simRanks.get(r)!.get(spot.parentId)!;
     const parentR1Main = resolveR1MainForNode(r, spot.parentId);

@@ -1702,7 +1702,11 @@ function reconcileRankTreeLinks(nodes: IndexedTreeNode[]): IndexedTreeNode[] {
               (p) =>
                 !p.isClone &&
                 !p.isExtraId &&
-                (savedSponsorId === 1 ? p.id === 1 : p.id === savedSponsorId || p.originMainId === savedSponsorId)
+                (savedSponsorId === 1
+                  ? p.id === 1
+                  : rankNum === 1
+                  ? p.id === savedSponsorId
+                  : p.originMainId === savedSponsorId)
             );
             sponsorNodeInRankId = spNodeInR ? spNodeInR.id : 0;
           }
@@ -1764,7 +1768,11 @@ function reconcileRankTreeLinks(nodes: IndexedTreeNode[]): IndexedTreeNode[] {
           (p) =>
             !p.isClone &&
             !p.isExtraId &&
-            (spMainId === 1 ? p.id === 1 : p.id === spMainId || p.originMainId === spMainId)
+            (spMainId === 1
+              ? p.id === 1
+              : rankNum === 1
+              ? p.id === spMainId
+              : p.originMainId === spMainId)
         );
         const slot = spNodeInRank
           ? findExtraIdPlacementInRankNodes(placedNodes, spNodeInRank.id)
