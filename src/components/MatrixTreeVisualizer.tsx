@@ -7195,8 +7195,11 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
               txHash: confirmedTxHash,
             });
             setModalUpgradeTargetRank(Math.min(27, rankToUpgrade + 1));
-            await fetchPerIdHistoryForModal();
-            await loadOnChainTree(selectedRank, { silent: true, forceSync: true });
+            await fetchPerIdHistoryForModal(true);
+            await loadOnChainTree(selectedRank, { silent: false, forceSync: true });
+            if (typeof window !== 'undefined') {
+              window.dispatchEvent(new CustomEvent('matrix:tree:refresh'));
+            }
           } catch (err: any) {
             const errMsg = err?.message || 'การอัปเกรดแรงค์ล้มเหลว';
             setModalUpgradeMessage(null);
