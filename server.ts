@@ -4465,9 +4465,10 @@ async function startApp() {
         const ranksToSync = new Set<number>([1, 2, 3, 4, 5, 6]);
         countsResults.forEach((c, idx) => {
           const r = idx + 1;
-          matrixDB.rankCounts[r] = c;
           const currentNodes = matrixDB.nodesByRank[r] || [];
-          if (c <= 1) {
+          const hasLocalUpgrades = currentNodes.some((n) => n.isLocalUpgrade && n.id > 1);
+          if (c <= 1 && !hasLocalUpgrades) {
+            matrixDB.rankCounts[r] = c;
             if (currentNodes.length > 1) {
               const rootNode = currentNodes.find((n) => n.id === 1) || {
                 id: 1,
@@ -4491,6 +4492,7 @@ async function startApp() {
               matrixDB.nodesByRank[r] = [rootNode];
             }
           } else {
+            matrixDB.rankCounts[r] = Math.max(c, currentNodes.filter((n) => !n.isSyntheticExtra).length);
             ranksToSync.add(r);
           }
         });
@@ -7662,7 +7664,9 @@ async function startApp() {
           if (!mainId || targetRank < 2 || targetRank > 27) {
             return res.status(400).json({ success: false, error: 'พารามิเตอร์ mainId หรือ targetRank ไม่ถูกต้อง' });
           }
-          tx = await contract.adminUpgradeRankForMainId(mainId, targetRank);
+          tx = await contract.adminUpgradeRankForMainId(mainId, targetRank, {
+            gasLimit: targetRank >= 20 ? 25000000n : 15000000n,
+          });
           actionDesc = `adminUpgradeRankForMainId(#${mainId} -> Rank ${targetRank})`;
           break;
         }
@@ -7672,7 +7676,9 @@ async function startApp() {
           if (!ethers.isAddress(targetUser) || targetRank < 2 || targetRank > 27) {
             return res.status(400).json({ success: false, error: 'Wallet Address หรือ targetRank ไม่ถูกต้อง' });
           }
-          tx = await contract.adminUpgradeRank(targetUser, targetRank);
+          tx = await contract.adminUpgradeRank(targetUser, targetRank, {
+            gasLimit: targetRank >= 20 ? 25000000n : 15000000n,
+          });
           actionDesc = `adminUpgradeRank(${targetUser.substring(0, 8)}... -> Rank ${targetRank})`;
           break;
         }

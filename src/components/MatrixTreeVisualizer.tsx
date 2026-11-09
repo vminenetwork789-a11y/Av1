@@ -6754,40 +6754,49 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
       {/* ===================================================================== */}
       {expandedBenefitNodeId !== null &&
         (activeNodesMap.has(expandedBenefitNodeId) ||
-          compactSimNodes.some((n) => n.id === expandedBenefitNodeId)) &&
+          compactSimNodes.some((n) => n.id === expandedBenefitNodeId) ||
+          perIdReportsMap.has(expandedBenefitNodeId)) &&
         (() => {
         const simFallback = compactSimNodes.find((n) => n.id === expandedBenefitNodeId);
+        const repFallback = perIdReportsMap.get(expandedBenefitNodeId);
         const modalNode: NonNullable<ReturnType<typeof activeNodesMap.get>> =
           activeNodesMap.get(expandedBenefitNodeId) ||
           ({
-            id: simFallback?.id || expandedBenefitNodeId,
-            owner: simFallback?.owner || '0x7B900000000000000000000000000000000042A1',
-            parentId: simFallback?.parentId || 0,
+            id: simFallback?.id || repFallback?.id || expandedBenefitNodeId,
+            owner: simFallback?.owner || repFallback?.owner || '0x7B900000000000000000000000000000000042A1',
+            parentId: simFallback?.parentId ?? repFallback?.parentId ?? 0,
             leftChild: simFallback?.leftChild || 0,
             rightChild: simFallback?.rightChild || 0,
-            isClone: Boolean(simFallback?.isClone),
-            rank: selectedRank,
+            isClone: Boolean(simFallback?.isClone ?? repFallback?.isClone),
+            isExtraId: Boolean(repFallback?.isExtraId),
+            isExtraLineage: Boolean(repFallback?.isExtraId),
+            isAutoMainId: Boolean(repFallback?.isAutoId),
+            rank: repFallback ? 1 : selectedRank,
             level: 1,
-            isLeft: Boolean(simFallback?.isLeft),
-            originMainId: simFallback?.originMainId || simFallback?.id || expandedBenefitNodeId,
-            r1MainId: simFallback?.r1MainId || simFallback?.originMainId || simFallback?.id || expandedBenefitNodeId,
+            isLeft: Boolean(simFallback?.isLeft ?? (repFallback?.side === 'ซ้าย')),
+            originMainId: simFallback?.originMainId || repFallback?.originMainId || simFallback?.id || expandedBenefitNodeId,
+            r1MainId: simFallback?.r1MainId || repFallback?.id || simFallback?.originMainId || expandedBenefitNodeId,
             directUplineNodeId:
-              simFallback?.id === 1
+              (simFallback?.id || repFallback?.id) === 1
                 ? 0
+                : repFallback?.directSponsorNodeId
+                ? Number(repFallback.directSponsorNodeId)
                 : simFallback?.isClone
                 ? simFallback?.originMainId || simFallback?.parentId || 1
                 : simFallback?.parentId || 1,
-            cloneRound: simFallback?.cloneRound || (simFallback?.isClone ? 1 : 0),
+            cloneRound: simFallback?.cloneRound || repFallback?.cloneRound || (simFallback?.isClone ? 1 : 0),
             vaultBalance: 0,
-            upgradeRankPool: 0,
-            autoIdPool: 0,
-            extraIdPool: 0,
-            autoIdCount: 0,
-            extraIdCount: 0,
-            targetMainIdCurrentRank: selectedRank,
+            upgradeRankPool: Number(repFallback?.upgradeRankPool || 0),
+            autoIdPool: Number(repFallback?.newAutoIdPool || 0),
+            extraIdPool: Number(repFallback?.newExtraIdPool || 0),
+            autoIdCount: Number(repFallback?.totalAutoIdCount || 0),
+            extraIdCount: Number(repFallback?.totalExtraIdCount || 0),
+            targetMainIdCurrentRank: Number(repFallback?.currentMaxRank || selectedRank),
             directCommissionEarned: 0,
             levelCommissionEarned: 0,
             cloneLevelCommissionEarned: 0,
+            directRewardAllNodes: Number(repFallback?.direct30TotalUsdt || 0),
+            unilevelRewardAllNodes: Number(repFallback?.level30TotalUsdt || 0),
             levelBreakdown: Array(15).fill(0),
             cloneLevelBreakdown: Array(15).fill(0),
             levelOrderCounts: Array(15).fill(0),
@@ -6897,10 +6906,13 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
         };
 
         const currentMaxR =
-          modalNode.targetMainIdCurrentRank ||
-          mainReport?.currentMaxRank ||
-          modalNode.rank ||
-          1;
+          targetMainId === 1
+            ? 27
+            : Math.max(
+                Number(modalNode.targetMainIdCurrentRank || 0),
+                Number(mainReport?.currentMaxRank || 0),
+                modalNode.isExtraLineage ? Number(modalNode.rank || 1) : 1
+              );
 
         // เงื่อนไข Upgrade Pool: เฉพาะไอดี ที่ ไม่ใช่ EXTRA ID, โคลนนิ่ง ของ EXTRA ID
         const isExtraOrCloneOfExtra = Boolean(
@@ -7145,7 +7157,11 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
           try {
             let confirmedTxHash: string | null = null;
             if (onUpgradeToRank) {
-              await onUpgradeToRank(rankToUpgrade, targetMainId);
+              const upgRes = await onUpgradeToRank(rankToUpgrade, targetMainId);
+              if (upgRes && upgRes.success === false) {
+                throw new Error(upgRes.error || 'ไม่สามารถอัปเกรดแรงค์ได้');
+              }
+              confirmedTxHash = upgRes?.hash || upgRes?.txHash || null;
             } else {
               const res = await fetch('/api/matrix/upgrade', {
                 method: 'POST',
@@ -8568,10 +8584,15 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                       {pagedWalletReports.map((rep: any) => {
                       const nodeInActiveRank =
-                        activeNodesMap.get(Number(rep.id)) ||
-                        Array.from(activeNodesMap.values()).find(
-                          (n) => !n.isClone && (n.r1MainId === Number(rep.id) || n.originMainId === Number(rep.id))
-                        );
+                        selectedRank === 1
+                          ? activeNodesMap.get(Number(rep.id))
+                          : Array.from(activeNodesMap.values()).find(
+                              (n) =>
+                                !n.isClone &&
+                                !n.isExtraId &&
+                                !n.isExtraLineage &&
+                                (n.r1MainId === Number(rep.id) || n.originMainId === Number(rep.id))
+                            );
 
                       const badgeClass = rep.isClone
                         ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
@@ -8731,19 +8752,22 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
                           <div className="flex items-center gap-2 pt-1">
                             <button
                               type="button"
-                              onClick={() => {
-                                const targetNodeId = nodeInActiveRank ? nodeInActiveRank.id : Number(rep.id);
+                              onClick={async () => {
                                 const curMaxR = Number(rep.currentMaxRank || 1);
                                 setModalUpgradeTargetRank(Math.min(27, curMaxR + 1));
                                 setModalUpgradeMessage(null);
                                 setModalUpgradeError(null);
                                 setBenefitModalTab('all');
-                                if (!activeNodesMap.has(targetNodeId)) {
-                                  setSelectedRank(1);
-                                  loadOnChainTree(1);
-                                }
                                 setIsWalletIdsModalOpen(false);
-                                setExpandedBenefitNodeId(targetNodeId);
+                                if (nodeInActiveRank) {
+                                  setExpandedBenefitNodeId(nodeInActiveRank.id);
+                                } else {
+                                  setExpandedBenefitNodeId(Number(rep.id));
+                                  if (selectedRank !== 1) {
+                                    setSelectedRank(1);
+                                    await loadOnChainTree(1);
+                                  }
+                                }
                               }}
                               className="flex-1 py-1.5 px-2.5 rounded-lg bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-500 hover:to-violet-500 text-white font-bold text-[11px] transition cursor-pointer flex items-center justify-center gap-1 shadow"
                             >
@@ -8753,14 +8777,17 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
 
                             <button
                               type="button"
-                              onClick={() => {
-                                const targetNodeId = nodeInActiveRank ? nodeInActiveRank.id : Number(rep.id);
-                                if (!activeNodesMap.has(targetNodeId)) {
-                                  setSelectedRank(1);
-                                  loadOnChainTree(1);
-                                }
-                                navigateToNode(targetNodeId);
+                              onClick={async () => {
                                 setIsWalletIdsModalOpen(false);
+                                if (nodeInActiveRank) {
+                                  navigateToNode(nodeInActiveRank.id);
+                                } else {
+                                  if (selectedRank !== 1) {
+                                    setSelectedRank(1);
+                                    await loadOnChainTree(1);
+                                  }
+                                  navigateToNode(Number(rep.id));
+                                }
                               }}
                               className="py-1.5 px-2.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-amber-300 border border-slate-700 font-bold text-[11px] transition cursor-pointer"
                             >
