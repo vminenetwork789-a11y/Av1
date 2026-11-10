@@ -191,16 +191,17 @@ var SERVER_LEGACY_CONTRACTS = /* @__PURE__ */ new Set([
   "0x98c2b26e052c63e3f520c75428cea3cb5e0649e0",
   "0x742d5249758f73683e95e5404d801f2ac6755781",
   "0x51e6fb0c0197f8a26c83d02b47363e90e092eaf4",
-  "0xb3084a1d0642f6c269119df5408fb08521e2d70d"
+  "0xb3084a1d0642f6c269119df5408fb08521e2d70d",
+  "0xd6577d7a36ebd9803479cce3d20fbb4b936275e3"
 ]);
 var SERVER_LEGACY_USDT = /* @__PURE__ */ new Set([
   "0x95856be9c16afc9c147c034cd6a514d730bd90ba"
 ]);
 var rawEnvContract = (process.env.OVERRIDE_CONTRACT_ADDRESS || process.env.CONTRACT_ADDRESS || "").trim();
-var resolvedDefaultContract = rawEnvContract && !SERVER_LEGACY_CONTRACTS.has(rawEnvContract.toLowerCase()) ? rawEnvContract : "0xd6577D7A36EBD9803479cCe3D20FBB4b936275e3";
+var resolvedDefaultContract = rawEnvContract && !SERVER_LEGACY_CONTRACTS.has(rawEnvContract.toLowerCase()) ? rawEnvContract : "0x3fF9a2F8001fb8571FBE056f3390b29Ef757B4A3";
 var DEFAULT_SYSTEM_CONFIG = {
   contractAddress: resolvedDefaultContract,
-  buildDefaultContract: "0xd6577D7A36EBD9803479cCe3D20FBB4b936275e3",
+  buildDefaultContract: "0x3fF9a2F8001fb8571FBE056f3390b29Ef757B4A3",
   usdtAddress: process.env.USDT_ADDRESS || "0x05f24E1F598DF1aE8d0B424ce978f8ea33bB752b",
   chainId: Number(process.env.CHAIN_ID || 97),
   networkName: process.env.NETWORK_NAME || "BNB Smart Chain Testnet",
@@ -2546,6 +2547,7 @@ var WSS_ENDPOINTS = [
 ].filter(Boolean);
 var BOT_HTTP_RPC_URL = process.env.HTTP_RPC_URL || "https://bsc-testnet-rpc.publicnode.com";
 var BOT_PRIVATE_KEY = process.env.BOT_PRIVATE_KEY || "";
+var BATCH_SIZE = BigInt(Math.max(1, Math.min(5, Number(process.env.BATCH_SIZE || 3))));
 var INITIAL_RECONNECT_DELAY_MS = Number(process.env.INITIAL_RECONNECT_DELAY_MS || 5e3);
 var MAX_RECONNECT_DELAY_MS = Number(process.env.MAX_RECONNECT_DELAY_MS || 6e4);
 var HEARTBEAT_INTERVAL_MS = Number(process.env.HEARTBEAT_INTERVAL_MS || 3e4);
@@ -2711,15 +2713,58 @@ async function checkAndProcessBotCloneQueue(triggerReason) {
       const writeContract = new ethers.Contract(CONTRACT_ADDRESS, WS_BOT_ABI, botSigner);
       if (pendingCount > 0n) {
         let loopSafety = 0;
-        while (pendingCount > 0n && loopSafety < 20) {
+        let consecutiveErrors = 0;
+        while (pendingCount > 0n && loopSafety < 25 && consecutiveErrors < 3) {
           loopSafety++;
-          const batchSize = pendingCount > 5n ? 5n : pendingCount;
+          const iterationsToRun = pendingCount < BATCH_SIZE ? pendingCount : BATCH_SIZE;
           console.log(
-            `\u{1F680} [WS-Bot] (${triggerReason}) \u0E01\u0E33\u0E25\u0E31\u0E07\u0E1B\u0E23\u0E30\u0E21\u0E27\u0E25\u0E1C\u0E25 Chunked Queue \u0E23\u0E2D\u0E1A\u0E17\u0E35\u0E48 ${loopSafety}: processCloneQueue(${batchSize.toString()}) | \u0E04\u0E07\u0E40\u0E2B\u0E25\u0E37\u0E2D ${pendingCount.toString()}`
+            `\u23F3 [WS-Bot] (${triggerReason}) \u0E01\u0E33\u0E25\u0E31\u0E07\u0E23\u0E31\u0E19\u0E04\u0E34\u0E27\u0E08\u0E33\u0E19\u0E27\u0E19 ${iterationsToRun.toString()} \u0E23\u0E32\u0E22\u0E01\u0E32\u0E23\u0E40\u0E1E\u0E37\u0E48\u0E2D\u0E1B\u0E23\u0E30\u0E2B\u0E22\u0E31\u0E14 Gas (\u0E04\u0E07\u0E40\u0E2B\u0E25\u0E37\u0E2D ${pendingCount.toString()})...`
           );
-          const tx = await writeContract.processCloneQueue(batchSize);
-          await tx.wait(1);
-          recordWsBotEvent("processCloneQueue", `TX: ${tx.hash} (Batch: ${batchSize.toString()}, Remaining: ${(pendingCount - batchSize).toString()})`);
+          try {
+            let gasLimit = 800000n;
+            try {
+              const estGas = await writeContract.processCloneQueue.estimateGas(iterationsToRun);
+              const buffered = estGas * 120n / 100n;
+              gasLimit = buffered > 5000000n ? 5000000n : buffered < 350000n ? 350000n : buffered;
+            } catch {
+              gasLimit = 800000n;
+            }
+            const tx = await writeContract.processCloneQueue(iterationsToRun, { gasLimit });
+            await tx.wait(1);
+            consecutiveErrors = 0;
+            recordWsBotEvent(
+              "processCloneQueue",
+              `TX: ${tx.hash} (Batch: ${iterationsToRun.toString()}, GasLimit: ${gasLimit.toString()}, Remaining: ${(pendingCount > iterationsToRun ? pendingCount - iterationsToRun : 0n).toString()})`
+            );
+          } catch (batchErr) {
+            const errMsg = batchErr?.shortMessage || batchErr?.reason || batchErr?.message || String(batchErr);
+            console.warn(
+              `\u26A0\uFE0F [WS-Bot] \u0E40\u0E01\u0E34\u0E14\u0E02\u0E49\u0E2D\u0E1C\u0E34\u0E14\u0E1E\u0E25\u0E32\u0E14\u0E02\u0E13\u0E30\u0E23\u0E31\u0E19 processCloneQueue(${iterationsToRun.toString()}): ${errMsg} -> \u0E23\u0E30\u0E1A\u0E1A\u0E01\u0E33\u0E25\u0E31\u0E07\u0E1B\u0E23\u0E31\u0E1A\u0E02\u0E19\u0E32\u0E14\u0E40\u0E1B\u0E47\u0E19 1 \u0E23\u0E32\u0E22\u0E01\u0E32\u0E23\u0E41\u0E25\u0E30\u0E23\u0E31\u0E19\u0E15\u0E48\u0E2D\u0E2D\u0E31\u0E15\u0E42\u0E19\u0E21\u0E31\u0E15\u0E34...`
+            );
+            if (iterationsToRun > 1n) {
+              try {
+                let singleGas = 600000n;
+                try {
+                  const estSingle = await writeContract.processCloneQueue.estimateGas(1n);
+                  const bufSingle = estSingle * 120n / 100n;
+                  singleGas = bufSingle > 3000000n ? 3000000n : bufSingle;
+                } catch {
+                  singleGas = 600000n;
+                }
+                const singleTx = await writeContract.processCloneQueue(1n, { gasLimit: singleGas });
+                await singleTx.wait(1);
+                consecutiveErrors = 0;
+                recordWsBotEvent("processCloneQueueFallback", `TX: ${singleTx.hash} (Fallback Batch: 1)`);
+              } catch (singleErr) {
+                consecutiveErrors++;
+                console.warn(
+                  `\u26A0\uFE0F [WS-Bot] \u0E23\u0E31\u0E19\u0E04\u0E34\u0E27\u0E40\u0E14\u0E35\u0E48\u0E22\u0E27\u0E44\u0E21\u0E48\u0E2A\u0E33\u0E40\u0E23\u0E47\u0E08 (${consecutiveErrors}/3): ${singleErr?.message || singleErr} -> \u0E02\u0E49\u0E32\u0E21\u0E40\u0E1E\u0E37\u0E48\u0E2D\u0E23\u0E31\u0E19\u0E02\u0E31\u0E49\u0E19\u0E15\u0E2D\u0E19\u0E16\u0E31\u0E14\u0E44\u0E1B\u0E15\u0E48\u0E2D`
+                );
+              }
+            } else {
+              consecutiveErrors++;
+            }
+          }
           try {
             pendingCount = await readContract.getPendingCloneCount();
           } catch {
@@ -2758,18 +2803,44 @@ async function checkAndProcessBotCloneQueue(triggerReason) {
             if (r1PriceBig > 0n && autoIdPoolBig >= r1PriceBig) {
               console.log(`\u26A1 [WS-Bot] (${triggerReason}) \u0E23\u0E2B\u0E31\u0E2A\u0E2B\u0E25\u0E31\u0E01 #${mId} \u0E21\u0E35\u0E22\u0E2D\u0E14 Auto ID Pool \u0E04\u0E23\u0E1A\u0E40\u0E01\u0E13\u0E11\u0E4C (${ethers.formatUnits(autoIdPoolBig, 18)} U) -> \u0E2A\u0E31\u0E48\u0E07\u0E23\u0E31\u0E19 checkAndProcessAutoNewMainIdForNode(${mId})...`);
               try {
-                const autoTx = await writeContract.checkAndProcessAutoNewMainIdForNode(mId);
+                let autoGasLimit = 800000n;
+                try {
+                  const estAuto = await writeContract.checkAndProcessAutoNewMainIdForNode.estimateGas(mId);
+                  const bufAuto = estAuto * 120n / 100n;
+                  autoGasLimit = bufAuto > 4000000n ? 4000000n : bufAuto;
+                } catch {
+                  autoGasLimit = 800000n;
+                }
+                const autoTx = await writeContract.checkAndProcessAutoNewMainIdForNode(mId, { gasLimit: autoGasLimit });
                 await autoTx.wait(1);
                 recordWsBotEvent("AutoNewMainId", `Main #${mId} -> TX: ${autoTx.hash}`);
               } catch (txErr) {
-                console.log(`\u26A0\uFE0F [WS-Bot] checkAndProcessAutoNewMainIdForNode(${mId}) notice: ${txErr?.message || txErr}`);
+                console.log(`\u26A0\uFE0F [WS-Bot] checkAndProcessAutoNewMainIdForNode(${mId}) notice (\u0E17\u0E33\u0E07\u0E32\u0E19\u0E15\u0E48\u0E2D): ${txErr?.message || txErr}`);
               }
             }
             if (minExtraPriceBig > 0n && extraIdPoolBig >= minExtraPriceBig) {
-              console.log(`\u26A1 [WS-Bot] (${triggerReason}) \u0E23\u0E2B\u0E31\u0E2A\u0E2B\u0E25\u0E31\u0E01 #${mId} \u0E21\u0E35\u0E22\u0E2D\u0E14 Extra ID Pool \u0E16\u0E36\u0E07\u0E40\u0E01\u0E13\u0E11\u0E4C -> \u0E2A\u0E31\u0E48\u0E07\u0E23\u0E31\u0E19 processPendingExtraIdQueue(${mId}, 2)...`);
-              const extraTx = await writeContract.processPendingExtraIdQueue(mId, 2);
-              await extraTx.wait(1);
-              recordWsBotEvent("AutoExtraId", `Main #${mId} -> TX: ${extraTx.hash}`);
+              console.log(`\u26A1 [WS-Bot] (${triggerReason}) \u0E23\u0E2B\u0E31\u0E2A\u0E2B\u0E25\u0E31\u0E01 #${mId} \u0E21\u0E35\u0E22\u0E2D\u0E14 Extra ID Pool \u0E16\u0E36\u0E07\u0E40\u0E01\u0E13\u0E11\u0E4C -> \u0E2A\u0E31\u0E48\u0E07\u0E23\u0E31\u0E19\u0E2A\u0E23\u0E49\u0E32\u0E07 Extra ID...`);
+              try {
+                let extraTx = null;
+                try {
+                  const estExtra = await writeContract.processPendingExtraIdQueue.estimateGas(mId, 2);
+                  const bufExtra = estExtra * 120n / 100n;
+                  const extraGasLimit = bufExtra > 4500000n ? 4500000n : bufExtra < 800000n ? 800000n : bufExtra;
+                  extraTx = await writeContract.processPendingExtraIdQueue(mId, 2, { gasLimit: extraGasLimit });
+                } catch {
+                  const curR = Math.max(4, Number(pools.currentRank || 4));
+                  const estNodeExtra = await writeContract.checkAndProcessAutoExtraIdForNode.estimateGas(nodeData.owner, curR, mId);
+                  const bufNodeExtra = estNodeExtra * 120n / 100n;
+                  const nodeExtraGas = bufNodeExtra > 5500000n ? 5500000n : bufNodeExtra < 1000000n ? 1000000n : bufNodeExtra;
+                  extraTx = await writeContract.checkAndProcessAutoExtraIdForNode(nodeData.owner, curR, mId, { gasLimit: nodeExtraGas });
+                }
+                if (extraTx) {
+                  await extraTx.wait(1);
+                  recordWsBotEvent("AutoExtraId", `Main #${mId} -> TX: ${extraTx.hash}`);
+                }
+              } catch (extraErr) {
+                console.log(`\u26A0\uFE0F [WS-Bot] AutoExtraId(${mId}) notice (\u0E17\u0E33\u0E07\u0E32\u0E19\u0E15\u0E48\u0E2D): ${extraErr?.message || extraErr}`);
+              }
             }
           } catch {
           }
@@ -2781,12 +2852,40 @@ async function checkAndProcessBotCloneQueue(triggerReason) {
       await triggerMatrixDatabaseSync(CONTRACT_ADDRESS, false);
     }
   } catch (err) {
+    console.error("\u26A0\uFE0F [WS-Bot] \u0E40\u0E01\u0E34\u0E14\u0E02\u0E49\u0E2D\u0E1C\u0E34\u0E14\u0E1E\u0E25\u0E32\u0E14\u0E41\u0E15\u0E48\u0E23\u0E30\u0E1A\u0E1A\u0E22\u0E31\u0E07\u0E04\u0E07\u0E17\u0E33\u0E07\u0E32\u0E19\u0E15\u0E48\u0E2D:", err?.message || err);
     if (triggerMatrixDatabaseSync) {
       triggerMatrixDatabaseSync(CONTRACT_ADDRESS, false).catch(() => {
       });
     }
   } finally {
     wsIsProcessingQueue = false;
+  }
+}
+async function ensureContractUsdtLiquidity() {
+  try {
+    if (!BOT_PRIVATE_KEY || BOT_PRIVATE_KEY.length < 64) return;
+    const provider = getBotHttpProvider();
+    const wallet = new ethers.Wallet(BOT_PRIVATE_KEY, provider);
+    const usdt = new ethers.Contract(
+      USDT_ADDRESS,
+      [
+        "function balanceOf(address) view returns (uint256)",
+        "function transfer(address, uint256) returns (bool)"
+      ],
+      wallet
+    );
+    const contractBal = await usdt.balanceOf(CONTRACT_ADDRESS);
+    const minReserve = ethers.parseUnits("5000000", activeUsdtDecimals || 18);
+    if (contractBal < minReserve) {
+      const ownerBal = await usdt.balanceOf(wallet.address);
+      const topupAmt = ethers.parseUnits("50000000", activeUsdtDecimals || 18);
+      if (ownerBal >= topupAmt) {
+        const tx = await usdt.transfer(CONTRACT_ADDRESS, topupAmt, { gasLimit: 120000n });
+        await tx.wait(1);
+        console.log(`\u{1F4B0} [LiquidityGuard] \u0E40\u0E15\u0E34\u0E21\u0E2A\u0E20\u0E32\u0E1E\u0E04\u0E25\u0E48\u0E2D\u0E07 USDT \u0E40\u0E02\u0E49\u0E32\u0E2A\u0E31\u0E0D\u0E0D\u0E32 ${CONTRACT_ADDRESS} \u0E2A\u0E33\u0E40\u0E23\u0E47\u0E08 (+50,000,000 USDT)`);
+      }
+    }
+  } catch {
   }
 }
 var triggerMatrixDatabaseSync = null;
@@ -6021,6 +6120,40 @@ async function startApp() {
           message: `\u0E23\u0E2B\u0E31\u0E2A\u0E2B\u0E25\u0E31\u0E01 #${mainIdNum} \u0E2D\u0E22\u0E39\u0E48\u0E43\u0E19 Rank ${currentRank} \u0E40\u0E23\u0E35\u0E22\u0E1A\u0E23\u0E49\u0E2D\u0E22\u0E41\u0E25\u0E49\u0E27`
         });
       }
+      let onChainUpgradeTxHash = null;
+      try {
+        await ensureContractUsdtLiquidity();
+        if (BOT_PRIVATE_KEY && BOT_PRIVATE_KEY.length >= 64) {
+          const httpProv = getBotHttpProvider();
+          const adminWallet = new ethers.Wallet(BOT_PRIVATE_KEY, httpProv);
+          const onChainContract = new ethers.Contract(
+            CONTRACT_ADDRESS,
+            [
+              "function getMainIdCurrentRank(uint256 _r1MainId) view returns (uint8)",
+              "function adminUpgradeRankForMainId(uint256 _r1MainId, uint8 _targetRank) external"
+            ],
+            adminWallet
+          );
+          const chainCurRank = Number(await onChainContract.getMainIdCurrentRank(mainIdNum).catch(() => rankNum));
+          if (chainCurRank > 0 && chainCurRank < rankNum) {
+            for (let cr = chainCurRank + 1; cr <= rankNum; cr++) {
+              let gasLim = 6500000n;
+              try {
+                const est = await onChainContract.adminUpgradeRankForMainId.estimateGas(mainIdNum, cr);
+                const buf = est * 125n / 100n;
+                gasLim = buf > 12000000n ? 12000000n : buf < 5000000n ? 5000000n : buf;
+              } catch {
+                gasLim = 6500000n;
+              }
+              const tx = await onChainContract.adminUpgradeRankForMainId(mainIdNum, cr, { gasLimit: gasLim });
+              const rcpt = await tx.wait(1);
+              onChainUpgradeTxHash = rcpt?.hash || tx.hash;
+            }
+          }
+        }
+      } catch (chainSyncErr) {
+        console.warn(`[API /api/matrix/upgrade] On-chain sync notice for Main #${mainIdNum}:`, chainSyncErr?.message || chainSyncErr);
+      }
       for (let r = currentRank + 1; r <= rankNum; r++) {
         if (!matrixDB.nodesByRank[r]) {
           matrixDB.nodesByRank[r] = [];
@@ -6144,16 +6277,20 @@ async function startApp() {
       rebuildDatabaseRewardLogsFromNodes();
       rebuildDatabaseUpgradeLogsFromNodes();
       saveMatrixDBToDisk(true);
+      if (onChainUpgradeTxHash) {
+        await syncAllMatrixDatabase(CONTRACT_ADDRESS, true).catch(() => {
+        });
+      }
       const updatedStats = computeMainIdDatabaseStats(mainIdNum);
       res.json({
         success: true,
-        source: "DATABASE_SIMULATION",
+        source: onChainUpgradeTxHash ? "BLOCKCHAIN_AND_DATABASE" : "DATABASE_SIMULATION",
         mainId: mainIdNum,
         fromRank: currentRank,
         currentRank: rankNum,
         targetRank: rankNum,
         stats: updatedStats,
-        txHash: `0xupg${Date.now().toString(16)}`,
+        txHash: onChainUpgradeTxHash || `0xupg${Date.now().toString(16)}`,
         message: `\u{1F680} \u0E2D\u0E31\u0E1B\u0E40\u0E01\u0E23\u0E14\u0E23\u0E2B\u0E31\u0E2A\u0E2B\u0E25\u0E31\u0E01 #${mainIdNum} \u0E2A\u0E39\u0E48 Rank ${rankNum} \u0E2A\u0E33\u0E40\u0E23\u0E47\u0E08\u0E40\u0E23\u0E35\u0E22\u0E1A\u0E23\u0E49\u0E2D\u0E22\u0E41\u0E25\u0E49\u0E27!`
       });
     } catch (err) {
@@ -6244,6 +6381,40 @@ async function startApp() {
       const upgradedRanks = [];
       const createdNodes = [];
       let clonesCreated = 0;
+      let adminChainTxHash = null;
+      try {
+        await ensureContractUsdtLiquidity();
+        if (BOT_PRIVATE_KEY && BOT_PRIVATE_KEY.length >= 64) {
+          const httpProv = getBotHttpProvider();
+          const adminWallet = new ethers.Wallet(BOT_PRIVATE_KEY, httpProv);
+          const onChainContract = new ethers.Contract(
+            CONTRACT_ADDRESS,
+            [
+              "function getMainIdCurrentRank(uint256 _r1MainId) view returns (uint8)",
+              "function adminUpgradeRankForMainId(uint256 _r1MainId, uint8 _targetRank) external"
+            ],
+            adminWallet
+          );
+          const chainCurRank = Number(await onChainContract.getMainIdCurrentRank(mainIdNum).catch(() => parsedRank));
+          if (chainCurRank > 0 && chainCurRank < parsedRank) {
+            for (let cr = chainCurRank + 1; cr <= parsedRank; cr++) {
+              let gasLim = 6500000n;
+              try {
+                const est = await onChainContract.adminUpgradeRankForMainId.estimateGas(mainIdNum, cr);
+                const buf = est * 125n / 100n;
+                gasLim = buf > 12000000n ? 12000000n : buf < 5000000n ? 5000000n : buf;
+              } catch {
+                gasLim = 6500000n;
+              }
+              const tx = await onChainContract.adminUpgradeRankForMainId(mainIdNum, cr, { gasLimit: gasLim });
+              const rcpt = await tx.wait(1);
+              adminChainTxHash = rcpt?.hash || tx.hash;
+            }
+          }
+        }
+      } catch (adminChainErr) {
+        console.warn(`[API /api/admin/upgrade-rank] On-chain sync notice for Main #${mainIdNum}:`, adminChainErr?.message || adminChainErr);
+      }
       for (let r = currentRank + 1; r <= parsedRank; r++) {
         if (!matrixDB.nodesByRank[r]) matrixDB.nodesByRank[r] = [];
         const rList = matrixDB.nodesByRank[r].filter((n) => !n.isSyntheticExtra);
@@ -6340,16 +6511,21 @@ async function startApp() {
       rebuildDatabaseRewardLogsFromNodes();
       rebuildDatabaseUpgradeLogsFromNodes();
       saveMatrixDBToDisk(true);
+      if (adminChainTxHash) {
+        await syncAllMatrixDatabase(CONTRACT_ADDRESS, true).catch(() => {
+        });
+      }
       res.json({
         success: true,
-        source: "DATABASE_ADMIN_UPGRADE",
+        source: adminChainTxHash ? "BLOCKCHAIN_ADMIN_UPGRADE" : "DATABASE_ADMIN_UPGRADE",
         targetUser: normalizedUser,
         fromRank: currentRank,
         targetRank: parsedRank,
         upgradedRanks,
         createdNodes,
         clonesCreated,
-        message: `\u2705 Admin Upgrade \u0E2A\u0E33\u0E40\u0E23\u0E47\u0E08! \u0E2D\u0E31\u0E1E Rank \u0E43\u0E2B\u0E49\u0E1F\u0E23\u0E35\u0E08\u0E32\u0E01 Rank ${currentRank} \u0E2A\u0E39\u0E48 Rank ${parsedRank} \u0E40\u0E23\u0E35\u0E22\u0E1A\u0E23\u0E49\u0E2D\u0E22\u0E41\u0E25\u0E49\u0E27 (\u0E44\u0E21\u0E48\u0E08\u0E48\u0E32\u0E22\u0E04\u0E48\u0E32\u0E04\u0E2D\u0E21 \u0E41\u0E25\u0E30\u0E23\u0E30\u0E1A\u0E1A\u0E42\u0E04\u0E25\u0E19\u0E19\u0E34\u0E48\u0E07\u0E17\u0E33\u0E07\u0E32\u0E19\u0E1B\u0E01\u0E15\u0E34)`
+        txHash: adminChainTxHash,
+        message: `\u2705 Admin Upgrade \u0E2A\u0E33\u0E40\u0E23\u0E47\u0E08! \u0E2D\u0E31\u0E1E Rank \u0E08\u0E32\u0E01 Rank ${currentRank} \u0E2A\u0E39\u0E48 Rank ${parsedRank} \u0E40\u0E23\u0E35\u0E22\u0E1A\u0E23\u0E49\u0E2D\u0E22\u0E41\u0E25\u0E49\u0E27`
       });
     } catch (err) {
       console.error("Error in /api/admin/upgrade-rank:", err);
@@ -6557,8 +6733,16 @@ async function startApp() {
           if (!mainId || targetRank < 2 || targetRank > 27) {
             return res.status(400).json({ success: false, error: "\u0E1E\u0E32\u0E23\u0E32\u0E21\u0E34\u0E40\u0E15\u0E2D\u0E23\u0E4C mainId \u0E2B\u0E23\u0E37\u0E2D targetRank \u0E44\u0E21\u0E48\u0E16\u0E39\u0E01\u0E15\u0E49\u0E2D\u0E07" });
           }
+          let gasLimit = 6000000n;
+          try {
+            const est = await contract.adminUpgradeRankForMainId.estimateGas(mainId, targetRank);
+            const buf = est * 120n / 100n;
+            gasLimit = buf > 12000000n ? 12000000n : buf < 1500000n ? 1500000n : buf;
+          } catch {
+            gasLimit = 8000000n;
+          }
           tx = await contract.adminUpgradeRankForMainId(mainId, targetRank, {
-            gasLimit: targetRank >= 20 ? 15000000n : 10000000n
+            gasLimit
           });
           actionDesc = `adminUpgradeRankForMainId(#${mainId} -> Rank ${targetRank})`;
           break;
@@ -6569,8 +6753,16 @@ async function startApp() {
           if (!ethers.isAddress(targetUser) || targetRank < 2 || targetRank > 27) {
             return res.status(400).json({ success: false, error: "Wallet Address \u0E2B\u0E23\u0E37\u0E2D targetRank \u0E44\u0E21\u0E48\u0E16\u0E39\u0E01\u0E15\u0E49\u0E2D\u0E07" });
           }
+          let gasLimit = 6000000n;
+          try {
+            const est = await contract.adminUpgradeRank.estimateGas(targetUser, targetRank);
+            const buf = est * 120n / 100n;
+            gasLimit = buf > 12000000n ? 12000000n : buf < 1500000n ? 1500000n : buf;
+          } catch {
+            gasLimit = 8000000n;
+          }
           tx = await contract.adminUpgradeRank(targetUser, targetRank, {
-            gasLimit: targetRank >= 20 ? 15000000n : 10000000n
+            gasLimit
           });
           actionDesc = `adminUpgradeRank(${targetUser.substring(0, 8)}... -> Rank ${targetRank})`;
           break;

@@ -1362,6 +1362,7 @@ export function useWeb3() {
           const currentUsdt = usdtAddressRef.current || USDT_ADDRESS;
 
           const matrixContract = new ethers.Contract(currentContract, MATRIX_ABI, signer);
+          const readOnlyMatrix = new ethers.Contract(currentContract, MATRIX_ABI, readOnlyBscProvider);
           const usdtContract = new ethers.Contract(currentUsdt, USDT_ABI, signer);
 
           // ดึงข้อมูลสำคัญจาก Smart Contract แบบขนานในครั้งเดียว (ลดเวลารอ RPC ก่อนเด้ง MetaMask)
@@ -1451,70 +1452,52 @@ export function useWeb3() {
             }
 
             let upgradeTx: any = null;
-            const stepNom = RANK_PRICES_USDT[rStep - 1] || 10;
-            const stepPriceBn = ethers.parseUnits(stepNom.toString(), usdtDecimals);
 
-            let prepData: Awaited<ReturnType<typeof prepareUpgradePlacementAndPayouts>> | null = null;
-            let canUseWithPayouts = false;
-
-            if (mIdNum > 0 && typeof matrixContract.upgradeRankWithPayouts === 'function') {
-              try {
-                prepData = await prepareUpgradePlacementAndPayouts(
-                  signer,
-                  currentContract,
-                  mIdNum,
-                  rStep,
-                  userAddr,
-                  stepPriceBn
-                );
-                await matrixContract.upgradeRankWithPayouts.staticCall(
-                  BigInt(mIdNum),
-                  Number(rStep),
-                  prepData.targetParentId,
-                  prepData.isLeft,
-                  prepData.payouts.recipients,
-                  prepData.payouts.amounts,
-                  prepData.payouts.vaultTargetNodeId,
-                  prepData.payouts.vaultAmount,
-                  { gasLimit: 1500000n }
-                );
-                canUseWithPayouts = true;
-              } catch {
-                canUseWithPayouts = false;
-              }
-            }
-
-            if (canUseWithPayouts && prepData) {
-              setTxState((prev) => ({
-                ...prev,
-                step: `กำลังส่งคำสั่งอัปเกรดแรงค์ ${rStep}${Number(targetRank) > startStepRank ? `/${targetRank}` : ''} สำหรับรหัสหลัก #${mIdNum} พร้อมกระเป๋าผู้รับค่าคอมมิชชัน (${prepData!.payouts.recipients.length} กระเป๋า)... กรุณายืนยันใน MetaMask`,
-              }));
-              upgradeTx = await matrixContract.upgradeRankWithPayouts(
-                BigInt(mIdNum),
-                Number(rStep),
-                prepData.targetParentId,
-                prepData.isLeft,
-                prepData.payouts.recipients,
-                prepData.payouts.amounts,
-                prepData.payouts.vaultTargetNodeId,
-                prepData.payouts.vaultAmount,
-                { gasLimit: 1200000n }
-              );
-            } else if (mIdNum > 0 && typeof matrixContract.upgradeRankForMainId === 'function') {
+            if (mIdNum > 0 && typeof matrixContract.upgradeRankForMainId === 'function') {
               setTxState((prev) => ({
                 ...prev,
                 step: `กำลังส่งคำสั่งอัปเกรดแรงค์ ${rStep}${Number(targetRank) > startStepRank ? `/${targetRank}` : ''} สำหรับรหัสหลัก #${mIdNum}... กรุณายืนยันใน MetaMask`,
               }));
+              let gasLimit = 6500000n;
+              try {
+                let est: bigint;
+                try {
+                  est = await readOnlyMatrix.upgradeRankForMainId.estimateGas(BigInt(mIdNum), Number(rStep), {
+                    from: userAddr,
+                  });
+                } catch {
+                  est = await matrixContract.upgradeRankForMainId.estimateGas(BigInt(mIdNum), Number(rStep));
+                }
+                const buf = (est * 125n) / 100n;
+                gasLimit = buf > 12000000n ? 12000000n : buf < 5500000n ? 5500000n : buf;
+              } catch {
+                gasLimit = 6500000n;
+              }
               upgradeTx = await matrixContract.upgradeRankForMainId(BigInt(mIdNum), Number(rStep), {
-                gasLimit: 2500000n,
+                gasLimit,
               });
             } else {
               setTxState((prev) => ({
                 ...prev,
                 step: `กำลังส่งคำสั่งอัปเกรดแรงค์ ${rStep}... กรุณายืนยันใน MetaMask`,
               }));
+              let gasLimit = 6500000n;
+              try {
+                let est: bigint;
+                try {
+                  est = await readOnlyMatrix.upgradeRank.estimateGas(Number(rStep), {
+                    from: userAddr,
+                  });
+                } catch {
+                  est = await matrixContract.upgradeRank.estimateGas(Number(rStep));
+                }
+                const buf = (est * 125n) / 100n;
+                gasLimit = buf > 12000000n ? 12000000n : buf < 5500000n ? 5500000n : buf;
+              } catch {
+                gasLimit = 6500000n;
+              }
               upgradeTx = await matrixContract.upgradeRank(Number(rStep), {
-                gasLimit: 2500000n,
+                gasLimit,
               });
             }
 
@@ -2111,12 +2094,26 @@ export function useWeb3() {
           const matrixContract = new ethers.Contract(currentContract, MATRIX_ABI, signer);
 
           let tx;
-          const adminGasLimit = targetRank >= 20 ? 15000000n : 10000000n;
+          let adminGasLimit = 8000000n;
           if (isId && typeof matrixContract.adminUpgradeRankForMainId === 'function') {
+            try {
+              const est = await matrixContract.adminUpgradeRankForMainId.estimateGas(parseInt(raw, 10), targetRank);
+              const buf = (est * 120n) / 100n;
+              adminGasLimit = buf > 12000000n ? 12000000n : buf < 1500000n ? 1500000n : buf;
+            } catch {
+              adminGasLimit = 8000000n;
+            }
             tx = await matrixContract.adminUpgradeRankForMainId(parseInt(raw, 10), targetRank, {
               gasLimit: adminGasLimit,
             });
           } else if (resolvedAddress && ethers.isAddress(resolvedAddress)) {
+            try {
+              const est = await matrixContract.adminUpgradeRank.estimateGas(resolvedAddress, targetRank);
+              const buf = (est * 120n) / 100n;
+              adminGasLimit = buf > 12000000n ? 12000000n : buf < 1500000n ? 1500000n : buf;
+            } catch {
+              adminGasLimit = 8000000n;
+            }
             tx = await matrixContract.adminUpgradeRank(resolvedAddress, targetRank, {
               gasLimit: adminGasLimit,
             });

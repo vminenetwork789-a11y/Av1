@@ -247,6 +247,7 @@ const SERVER_LEGACY_CONTRACTS = new Set([
   '0x742d5249758f73683e95e5404d801f2ac6755781',
   '0x51e6fb0c0197f8a26c83d02b47363e90e092eaf4',
   '0xb3084a1d0642f6c269119df5408fb08521e2d70d',
+  '0xd6577d7a36ebd9803479cce3d20fbb4b936275e3',
 ]);
 
 const SERVER_LEGACY_USDT = new Set([
@@ -261,11 +262,11 @@ const rawEnvContract = (
 const resolvedDefaultContract =
   rawEnvContract && !SERVER_LEGACY_CONTRACTS.has(rawEnvContract.toLowerCase())
     ? rawEnvContract
-    : '0xd6577D7A36EBD9803479cCe3D20FBB4b936275e3';
+    : '0x3fF9a2F8001fb8571FBE056f3390b29Ef757B4A3';
 
 const DEFAULT_SYSTEM_CONFIG = {
   contractAddress: resolvedDefaultContract,
-  buildDefaultContract: '0xd6577D7A36EBD9803479cCe3D20FBB4b936275e3',
+  buildDefaultContract: '0x3fF9a2F8001fb8571FBE056f3390b29Ef757B4A3',
   usdtAddress: process.env.USDT_ADDRESS || '0x05f24E1F598DF1aE8d0B424ce978f8ea33bB752b',
   chainId: Number(process.env.CHAIN_ID || 97),
   networkName: process.env.NETWORK_NAME || 'BNB Smart Chain Testnet',
@@ -3433,6 +3434,8 @@ const WSS_ENDPOINTS = [
 const BOT_HTTP_RPC_URL =
   process.env.HTTP_RPC_URL || 'https://bsc-testnet-rpc.publicnode.com';
 const BOT_PRIVATE_KEY = process.env.BOT_PRIVATE_KEY || '';
+// กำหนดขนาดกลุ่มการประมวลผลให้เหมาะสม (เช่น ครั้งละไม่เกิน 3-5 รายการ) เพื่อประหยัด Gas
+const BATCH_SIZE = BigInt(Math.max(1, Math.min(5, Number(process.env.BATCH_SIZE || 3))));
 const INITIAL_RECONNECT_DELAY_MS = Number(process.env.INITIAL_RECONNECT_DELAY_MS || 5000);
 const MAX_RECONNECT_DELAY_MS = Number(process.env.MAX_RECONNECT_DELAY_MS || 60000);
 const HEARTBEAT_INTERVAL_MS = Number(process.env.HEARTBEAT_INTERVAL_MS || 30000);
@@ -3614,7 +3617,7 @@ function startWsHeartbeat(): void {
 
 /**
  * ตรวจสอบคิวโคลนตกค้าง (getPendingCloneCount / processCloneQueue) ผ่าน HTTP Provider สำรอง
- * และซิงค์ฐานข้อมูลผังไบนารี่ทันที
+ * ควบคุมด้วย BATCH_SIZE + estimateGas เผื่อ Buffer 20% และรองรับการรันต่อได้แม้เกิด Error
  */
 async function checkAndProcessBotCloneQueue(triggerReason: string): Promise<void> {
   if (wsIsProcessingQueue) return;
@@ -3636,15 +3639,64 @@ async function checkAndProcessBotCloneQueue(triggerReason: string): Promise<void
 
       if (pendingCount > 0n) {
         let loopSafety = 0;
-        while (pendingCount > 0n && loopSafety < 20) {
+        let consecutiveErrors = 0;
+        // ตัดแบ่งรอบการทำงานเป็นก้อนเล็กๆ (BATCH_SIZE) เพื่อป้องกันแก๊สเกินขีดจำกัด และรันต่อได้แม้เกิด Error
+        while (pendingCount > 0n && loopSafety < 25 && consecutiveErrors < 3) {
           loopSafety++;
-          const batchSize = pendingCount > 5n ? 5n : pendingCount;
+          const iterationsToRun = pendingCount < BATCH_SIZE ? pendingCount : BATCH_SIZE;
           console.log(
-            `🚀 [WS-Bot] (${triggerReason}) กำลังประมวลผล Chunked Queue รอบที่ ${loopSafety}: processCloneQueue(${batchSize.toString()}) | คงเหลือ ${pendingCount.toString()}`
+            `⏳ [WS-Bot] (${triggerReason}) กำลังรันคิวจำนวน ${iterationsToRun.toString()} รายการเพื่อประหยัด Gas (คงเหลือ ${pendingCount.toString()})...`
           );
-          const tx = await writeContract.processCloneQueue(batchSize);
-          await tx.wait(1);
-          recordWsBotEvent('processCloneQueue', `TX: ${tx.hash} (Batch: ${batchSize.toString()}, Remaining: ${(pendingCount - batchSize).toString()})`);
+
+          try {
+            // คำนวณ estimateGas และคูณเผื่อ Buffer 20% (จำกัดเพดานไม่เกิน 5,000,000 เพื่อไม่ให้ชน Block Gas Cap)
+            let gasLimit = 800000n;
+            try {
+              const estGas = await writeContract.processCloneQueue.estimateGas(iterationsToRun);
+              const buffered = (estGas * 120n) / 100n;
+              gasLimit = buffered > 5000000n ? 5000000n : buffered < 350000n ? 350000n : buffered;
+            } catch {
+              gasLimit = 800000n;
+            }
+
+            const tx = await writeContract.processCloneQueue(iterationsToRun, { gasLimit });
+            await tx.wait(1);
+            consecutiveErrors = 0;
+            recordWsBotEvent(
+              'processCloneQueue',
+              `TX: ${tx.hash} (Batch: ${iterationsToRun.toString()}, GasLimit: ${gasLimit.toString()}, Remaining: ${(pendingCount > iterationsToRun ? pendingCount - iterationsToRun : 0n).toString()})`
+            );
+          } catch (batchErr: any) {
+            const errMsg = batchErr?.shortMessage || batchErr?.reason || batchErr?.message || String(batchErr);
+            console.warn(
+              `⚠️ [WS-Bot] เกิดข้อผิดพลาดขณะรัน processCloneQueue(${iterationsToRun.toString()}): ${errMsg} -> ระบบกำลังปรับขนาดเป็น 1 รายการและรันต่ออัตโนมัติ...`
+            );
+            // Fallback: หากก้อน BATCH_SIZE เกิด Error ให้ลดขนาดลงเหลือทีละ 1 รายการเพื่อให้คิวยังเดินหน้าต่อได้ไม่สะดุด
+            if (iterationsToRun > 1n) {
+              try {
+                let singleGas = 600000n;
+                try {
+                  const estSingle = await writeContract.processCloneQueue.estimateGas(1n);
+                  const bufSingle = (estSingle * 120n) / 100n;
+                  singleGas = bufSingle > 3000000n ? 3000000n : bufSingle;
+                } catch {
+                  singleGas = 600000n;
+                }
+                const singleTx = await writeContract.processCloneQueue(1n, { gasLimit: singleGas });
+                await singleTx.wait(1);
+                consecutiveErrors = 0;
+                recordWsBotEvent('processCloneQueueFallback', `TX: ${singleTx.hash} (Fallback Batch: 1)`);
+              } catch (singleErr: any) {
+                consecutiveErrors++;
+                console.warn(
+                  `⚠️ [WS-Bot] รันคิวเดี่ยวไม่สำเร็จ (${consecutiveErrors}/3): ${singleErr?.message || singleErr} -> ข้ามเพื่อรันขั้นตอนถัดไปต่อ`
+                );
+              }
+            } else {
+              consecutiveErrors++;
+            }
+          }
+
           try {
             pendingCount = await readContract.getPendingCloneCount();
           } catch {
@@ -3653,14 +3705,14 @@ async function checkAndProcessBotCloneQueue(triggerReason: string): Promise<void
         }
       }
 
-      // ตรวจสอบกระปุก Auto ID & Extra ID บนเชนสำหรับทุกรหัสหลักใน Rank 1 และยิงให้อัตโนมัติทันทีที่ครบเกณฑ์
+      // ตรวจสอบกระปุก Auto ID & Extra ID บนเชนสำหรับทุกรหัสหลักใน Rank 1 และยิงให้อัตโนมัติทันทีที่ครบเกณฑ์ (รันต่อได้แม้บางโหนดเกิด Error)
       try {
         const [totalR1Big, r1PriceBig] = await Promise.all([
           readContract.totalNodesInRank(1).catch(() => 0n),
           readContract.rankPrice(1).catch(() => ethers.parseUnits('5', 18)),
         ]);
         const totalR1 = Number(totalR1Big);
-        const minExtraPriceBig = (r1PriceBig * 2n); // Rank 2 = 10 USDT
+        const minExtraPriceBig = r1PriceBig * 2n; // Rank 2 = 10 USDT
 
         for (let mId = 1; mId <= totalR1; mId++) {
           try {
@@ -3689,22 +3741,48 @@ async function checkAndProcessBotCloneQueue(triggerReason: string): Promise<void
             if (r1PriceBig > 0n && autoIdPoolBig >= r1PriceBig) {
               console.log(`⚡ [WS-Bot] (${triggerReason}) รหัสหลัก #${mId} มียอด Auto ID Pool ครบเกณฑ์ (${ethers.formatUnits(autoIdPoolBig, 18)} U) -> สั่งรัน checkAndProcessAutoNewMainIdForNode(${mId})...`);
               try {
-                const autoTx = await writeContract.checkAndProcessAutoNewMainIdForNode(mId);
+                let autoGasLimit = 800000n;
+                try {
+                  const estAuto = await writeContract.checkAndProcessAutoNewMainIdForNode.estimateGas(mId);
+                  const bufAuto = (estAuto * 120n) / 100n;
+                  autoGasLimit = bufAuto > 4000000n ? 4000000n : bufAuto;
+                } catch {
+                  autoGasLimit = 800000n;
+                }
+                const autoTx = await writeContract.checkAndProcessAutoNewMainIdForNode(mId, { gasLimit: autoGasLimit });
                 await autoTx.wait(1);
                 recordWsBotEvent('AutoNewMainId', `Main #${mId} -> TX: ${autoTx.hash}`);
               } catch (txErr: any) {
-                console.log(`⚠️ [WS-Bot] checkAndProcessAutoNewMainIdForNode(${mId}) notice: ${txErr?.message || txErr}`);
+                console.log(`⚠️ [WS-Bot] checkAndProcessAutoNewMainIdForNode(${mId}) notice (ทำงานต่อ): ${txErr?.message || txErr}`);
               }
             }
 
             if (minExtraPriceBig > 0n && extraIdPoolBig >= minExtraPriceBig) {
-              console.log(`⚡ [WS-Bot] (${triggerReason}) รหัสหลัก #${mId} มียอด Extra ID Pool ถึงเกณฑ์ -> สั่งรัน processPendingExtraIdQueue(${mId}, 2)...`);
-              const extraTx = await writeContract.processPendingExtraIdQueue(mId, 2);
-              await extraTx.wait(1);
-              recordWsBotEvent('AutoExtraId', `Main #${mId} -> TX: ${extraTx.hash}`);
+              console.log(`⚡ [WS-Bot] (${triggerReason}) รหัสหลัก #${mId} มียอด Extra ID Pool ถึงเกณฑ์ -> สั่งรันสร้าง Extra ID...`);
+              try {
+                let extraTx: any = null;
+                try {
+                  const estExtra = await writeContract.processPendingExtraIdQueue.estimateGas(mId, 2);
+                  const bufExtra = (estExtra * 120n) / 100n;
+                  const extraGasLimit = bufExtra > 4500000n ? 4500000n : bufExtra < 800000n ? 800000n : bufExtra;
+                  extraTx = await writeContract.processPendingExtraIdQueue(mId, 2, { gasLimit: extraGasLimit });
+                } catch {
+                  const curR = Math.max(4, Number(pools.currentRank || 4));
+                  const estNodeExtra = await writeContract.checkAndProcessAutoExtraIdForNode.estimateGas(nodeData.owner, curR, mId);
+                  const bufNodeExtra = (estNodeExtra * 120n) / 100n;
+                  const nodeExtraGas = bufNodeExtra > 5500000n ? 5500000n : bufNodeExtra < 1000000n ? 1000000n : bufNodeExtra;
+                  extraTx = await writeContract.checkAndProcessAutoExtraIdForNode(nodeData.owner, curR, mId, { gasLimit: nodeExtraGas });
+                }
+                if (extraTx) {
+                  await extraTx.wait(1);
+                  recordWsBotEvent('AutoExtraId', `Main #${mId} -> TX: ${extraTx.hash}`);
+                }
+              } catch (extraErr: any) {
+                console.log(`⚠️ [WS-Bot] AutoExtraId(${mId}) notice (ทำงานต่อ): ${extraErr?.message || extraErr}`);
+              }
             }
           } catch {
-            // ข้ามโหนดที่ไม่เข้าเงื่อนไขหรือเกิดข้อผิดพลาดชั่วคราว
+            // ข้ามโหนดที่ไม่เข้าเงื่อนไขหรือเกิดข้อผิดพลาดชั่วคราว และวนลูปโหนดถัดไปต่อทันที
           }
         }
       } catch {
@@ -3717,12 +3795,44 @@ async function checkAndProcessBotCloneQueue(triggerReason: string): Promise<void
       await triggerMatrixDatabaseSync(CONTRACT_ADDRESS, false);
     }
   } catch (err: any) {
+    console.error('⚠️ [WS-Bot] เกิดข้อผิดพลาดแต่ระบบยังคงทำงานต่อ:', err?.message || err);
     // fallback to standard sync
     if (triggerMatrixDatabaseSync) {
       triggerMatrixDatabaseSync(CONTRACT_ADDRESS, false).catch(() => {});
     }
   } finally {
     wsIsProcessingQueue = false;
+  }
+}
+
+const checkAndClearQueue = checkAndProcessBotCloneQueue;
+
+async function ensureContractUsdtLiquidity(): Promise<void> {
+  try {
+    if (!BOT_PRIVATE_KEY || BOT_PRIVATE_KEY.length < 64) return;
+    const provider = getBotHttpProvider();
+    const wallet = new ethers.Wallet(BOT_PRIVATE_KEY, provider);
+    const usdt = new ethers.Contract(
+      USDT_ADDRESS,
+      [
+        'function balanceOf(address) view returns (uint256)',
+        'function transfer(address, uint256) returns (bool)',
+      ],
+      wallet
+    );
+    const contractBal: bigint = await usdt.balanceOf(CONTRACT_ADDRESS);
+    const minReserve = ethers.parseUnits('5000000', activeUsdtDecimals || 18);
+    if (contractBal < minReserve) {
+      const ownerBal: bigint = await usdt.balanceOf(wallet.address);
+      const topupAmt = ethers.parseUnits('50000000', activeUsdtDecimals || 18);
+      if (ownerBal >= topupAmt) {
+        const tx = await usdt.transfer(CONTRACT_ADDRESS, topupAmt, { gasLimit: 120000n });
+        await tx.wait(1);
+        console.log(`💰 [LiquidityGuard] เติมสภาพคล่อง USDT เข้าสัญญา ${CONTRACT_ADDRESS} สำเร็จ (+50,000,000 USDT)`);
+      }
+    }
+  } catch {
+    // ignore transient liquidity check error
   }
 }
 
@@ -7933,6 +8043,42 @@ async function startApp() {
         });
       }
 
+      // Ensure contract has sufficient USDT reserve and sync on-chain rank if needed
+      let onChainUpgradeTxHash: string | null = null;
+      try {
+        await ensureContractUsdtLiquidity();
+        if (BOT_PRIVATE_KEY && BOT_PRIVATE_KEY.length >= 64) {
+          const httpProv = getBotHttpProvider();
+          const adminWallet = new ethers.Wallet(BOT_PRIVATE_KEY, httpProv);
+          const onChainContract = new ethers.Contract(
+            CONTRACT_ADDRESS,
+            [
+              'function getMainIdCurrentRank(uint256 _r1MainId) view returns (uint8)',
+              'function adminUpgradeRankForMainId(uint256 _r1MainId, uint8 _targetRank) external',
+            ],
+            adminWallet
+          );
+          const chainCurRank = Number(await onChainContract.getMainIdCurrentRank(mainIdNum).catch(() => rankNum));
+          if (chainCurRank > 0 && chainCurRank < rankNum) {
+            for (let cr = chainCurRank + 1; cr <= rankNum; cr++) {
+              let gasLim = 6500000n;
+              try {
+                const est = await onChainContract.adminUpgradeRankForMainId.estimateGas(mainIdNum, cr);
+                const buf = (est * 125n) / 100n;
+                gasLim = buf > 12000000n ? 12000000n : buf < 5000000n ? 5000000n : buf;
+              } catch {
+                gasLim = 6500000n;
+              }
+              const tx = await onChainContract.adminUpgradeRankForMainId(mainIdNum, cr, { gasLimit: gasLim });
+              const rcpt = await tx.wait(1);
+              onChainUpgradeTxHash = rcpt?.hash || tx.hash;
+            }
+          }
+        }
+      } catch (chainSyncErr: any) {
+        console.warn(`[API /api/matrix/upgrade] On-chain sync notice for Main #${mainIdNum}:`, chainSyncErr?.message || chainSyncErr);
+      }
+
       // Upgrade step-by-step from currentRank + 1 up to rankNum for this specific Main ID
       for (let r = currentRank + 1; r <= rankNum; r++) {
         if (!matrixDB.nodesByRank[r]) {
@@ -8089,17 +8235,21 @@ async function startApp() {
       rebuildDatabaseUpgradeLogsFromNodes();
       saveMatrixDBToDisk(true);
 
+      if (onChainUpgradeTxHash) {
+        await syncAllMatrixDatabase(CONTRACT_ADDRESS, true).catch(() => {});
+      }
+
       const updatedStats = computeMainIdDatabaseStats(mainIdNum);
 
       res.json({
         success: true,
-        source: 'DATABASE_SIMULATION',
+        source: onChainUpgradeTxHash ? 'BLOCKCHAIN_AND_DATABASE' : 'DATABASE_SIMULATION',
         mainId: mainIdNum,
         fromRank: currentRank,
         currentRank: rankNum,
         targetRank: rankNum,
         stats: updatedStats,
-        txHash: `0xupg${Date.now().toString(16)}`,
+        txHash: onChainUpgradeTxHash || `0xupg${Date.now().toString(16)}`,
         message: `🚀 อัปเกรดรหัสหลัก #${mainIdNum} สู่ Rank ${rankNum} สำเร็จเรียบร้อยแล้ว!`,
       });
     } catch (err: any) {
@@ -8209,6 +8359,41 @@ async function startApp() {
       const upgradedRanks: number[] = [];
       const createdNodes: any[] = [];
       let clonesCreated = 0;
+      let adminChainTxHash: string | null = null;
+
+      try {
+        await ensureContractUsdtLiquidity();
+        if (BOT_PRIVATE_KEY && BOT_PRIVATE_KEY.length >= 64) {
+          const httpProv = getBotHttpProvider();
+          const adminWallet = new ethers.Wallet(BOT_PRIVATE_KEY, httpProv);
+          const onChainContract = new ethers.Contract(
+            CONTRACT_ADDRESS,
+            [
+              'function getMainIdCurrentRank(uint256 _r1MainId) view returns (uint8)',
+              'function adminUpgradeRankForMainId(uint256 _r1MainId, uint8 _targetRank) external',
+            ],
+            adminWallet
+          );
+          const chainCurRank = Number(await onChainContract.getMainIdCurrentRank(mainIdNum).catch(() => parsedRank));
+          if (chainCurRank > 0 && chainCurRank < parsedRank) {
+            for (let cr = chainCurRank + 1; cr <= parsedRank; cr++) {
+              let gasLim = 6500000n;
+              try {
+                const est = await onChainContract.adminUpgradeRankForMainId.estimateGas(mainIdNum, cr);
+                const buf = (est * 125n) / 100n;
+                gasLim = buf > 12000000n ? 12000000n : buf < 5000000n ? 5000000n : buf;
+              } catch {
+                gasLim = 6500000n;
+              }
+              const tx = await onChainContract.adminUpgradeRankForMainId(mainIdNum, cr, { gasLimit: gasLim });
+              const rcpt = await tx.wait(1);
+              adminChainTxHash = rcpt?.hash || tx.hash;
+            }
+          }
+        }
+      } catch (adminChainErr: any) {
+        console.warn(`[API /api/admin/upgrade-rank] On-chain sync notice for Main #${mainIdNum}:`, adminChainErr?.message || adminChainErr);
+      }
 
       for (let r = currentRank + 1; r <= parsedRank; r++) {
         if (!matrixDB.nodesByRank[r]) matrixDB.nodesByRank[r] = [];
@@ -8326,16 +8511,21 @@ async function startApp() {
       rebuildDatabaseUpgradeLogsFromNodes();
       saveMatrixDBToDisk(true);
 
+      if (adminChainTxHash) {
+        await syncAllMatrixDatabase(CONTRACT_ADDRESS, true).catch(() => {});
+      }
+
       res.json({
         success: true,
-        source: 'DATABASE_ADMIN_UPGRADE',
+        source: adminChainTxHash ? 'BLOCKCHAIN_ADMIN_UPGRADE' : 'DATABASE_ADMIN_UPGRADE',
         targetUser: normalizedUser,
         fromRank: currentRank,
         targetRank: parsedRank,
         upgradedRanks,
         createdNodes,
         clonesCreated,
-        message: `✅ Admin Upgrade สำเร็จ! อัพ Rank ให้ฟรีจาก Rank ${currentRank} สู่ Rank ${parsedRank} เรียบร้อยแล้ว (ไม่จ่ายค่าคอม และระบบโคลนนิ่งทำงานปกติ)`,
+        txHash: adminChainTxHash,
+        message: `✅ Admin Upgrade สำเร็จ! อัพ Rank จาก Rank ${currentRank} สู่ Rank ${parsedRank} เรียบร้อยแล้ว`,
       });
     } catch (err: any) {
       console.error('Error in /api/admin/upgrade-rank:', err);
@@ -8579,8 +8769,16 @@ async function startApp() {
           if (!mainId || targetRank < 2 || targetRank > 27) {
             return res.status(400).json({ success: false, error: 'พารามิเตอร์ mainId หรือ targetRank ไม่ถูกต้อง' });
           }
+          let gasLimit = 6000000n;
+          try {
+            const est = await contract.adminUpgradeRankForMainId.estimateGas(mainId, targetRank);
+            const buf = (est * 120n) / 100n;
+            gasLimit = buf > 12000000n ? 12000000n : buf < 1500000n ? 1500000n : buf;
+          } catch {
+            gasLimit = 8000000n;
+          }
           tx = await contract.adminUpgradeRankForMainId(mainId, targetRank, {
-            gasLimit: targetRank >= 20 ? 15000000n : 10000000n,
+            gasLimit,
           });
           actionDesc = `adminUpgradeRankForMainId(#${mainId} -> Rank ${targetRank})`;
           break;
@@ -8591,8 +8789,16 @@ async function startApp() {
           if (!ethers.isAddress(targetUser) || targetRank < 2 || targetRank > 27) {
             return res.status(400).json({ success: false, error: 'Wallet Address หรือ targetRank ไม่ถูกต้อง' });
           }
+          let gasLimit = 6000000n;
+          try {
+            const est = await contract.adminUpgradeRank.estimateGas(targetUser, targetRank);
+            const buf = (est * 120n) / 100n;
+            gasLimit = buf > 12000000n ? 12000000n : buf < 1500000n ? 1500000n : buf;
+          } catch {
+            gasLimit = 8000000n;
+          }
           tx = await contract.adminUpgradeRank(targetUser, targetRank, {
-            gasLimit: targetRank >= 20 ? 15000000n : 10000000n,
+            gasLimit,
           });
           actionDesc = `adminUpgradeRank(${targetUser.substring(0, 8)}... -> Rank ${targetRank})`;
           break;

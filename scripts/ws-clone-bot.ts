@@ -61,7 +61,7 @@ const CONTRACT_ADDRESS =
   process.env.OVERRIDE_CONTRACT_ADDRESS ||
   process.env.CONTRACT_ADDRESS ||
   process.env.VITE_CONTRACT_ADDRESS ||
-  '0xd6577D7A36EBD9803479cCe3D20FBB4b936275e3';
+  '0x3fF9a2F8001fb8571FBE056f3390b29Ef757B4A3';
 
 const WSS_ENDPOINTS = [
   process.env.WSS_URL || 'wss://bsc-testnet-rpc.publicnode.com',
@@ -304,28 +304,56 @@ export async function checkAndProcessPendingQueues(triggerSource: string): Promi
         const botWallet = new ethers.Wallet(BOT_PRIVATE_KEY, httpProvider);
         const writeContract = new ethers.Contract(CONTRACT_ADDRESS, BOT_CONTRACT_ABI, botWallet);
 
-        while (pendingCloneCount > 0n) {
+        let loopSafety = 0;
+        let consecutiveErrors = 0;
+        // ตัดแบ่งรอบการทำงานเป็นก้อนเล็กๆ (BATCH_SIZE) เพื่อป้องกันแก๊สเกินขีดจำกัด และรันต่อได้แม้เกิด Error
+        while (pendingCloneCount > 0n && loopSafety < 25 && consecutiveErrors < 3) {
+          loopSafety++;
           const iterationsToRun =
             pendingCloneCount < BATCH_SIZE ? pendingCloneCount : BATCH_SIZE;
           console.log(
             `⏳ [WS-Bot] (${triggerSource}) กำลังรันคิวจำนวน ${iterationsToRun.toString()} รายการเพื่อประหยัด Gas...`
           );
 
-          // ตรวจสอบ Gas Limit ตอนส่งธุรกรรม: คำนวณ estimateGas และเผื่อ Buffer 20%
-          let gasLimit = 600000n;
           try {
-            const estGas = await writeContract.processCloneQueue.estimateGas(iterationsToRun);
-            gasLimit = (estGas * 120n) / 100n;
-          } catch {
-            gasLimit = 600000n;
+            // ตรวจสอบ Gas Limit ตอนส่งธุรกรรม: คำนวณ estimateGas และเผื่อ Buffer 20%
+            let gasLimit = 800000n;
+            try {
+              const estGas = await writeContract.processCloneQueue.estimateGas(iterationsToRun);
+              const buffered = (estGas * 120n) / 100n;
+              gasLimit = buffered > 5000000n ? 5000000n : buffered < 350000n ? 350000n : buffered;
+            } catch {
+              gasLimit = 800000n;
+            }
+
+            const tx = await writeContract.processCloneQueue(iterationsToRun, { gasLimit });
+            console.log(
+              `⏳ [WS-Bot] ส่ง TX สำเร็จ: ${tx.hash} (GasLimit: ${gasLimit.toString()}) | รอการยืนยันบล็อก...`
+            );
+            await tx.wait(1);
+            consecutiveErrors = 0;
+            console.log(`✅ [WS-Bot] ประมวลผลคิวโคลนสำเร็จ! TX: ${tx.hash}`);
+          } catch (batchErr: unknown) {
+            const errMsg = batchErr instanceof Error ? batchErr.message : String(batchErr);
+            console.error(`⚠️ [WS-Bot] เกิดข้อผิดพลาดขณะรันคิว (${iterationsToRun.toString()} รายการ): ${errMsg}`);
+            // Fallback: ลดขนาดเป็น 1 รายการเพื่อให้ระบบสามารถรันต่อไปได้แม้เกิด Error
+            if (iterationsToRun > 1n) {
+              try {
+                console.log('🔄 [WS-Bot] ปรับลดขนาดเป็น 1 รายการและรันต่ออัตโนมัติ...');
+                const singleTx = await writeContract.processCloneQueue(1n, { gasLimit: 600000n });
+                await singleTx.wait(1);
+                consecutiveErrors = 0;
+                console.log(`✅ [WS-Bot] ประมวลผลคิวเดี่ยวสำเร็จ! TX: ${singleTx.hash}`);
+              } catch (singleErr: unknown) {
+                consecutiveErrors++;
+                const sMsg = singleErr instanceof Error ? singleErr.message : String(singleErr);
+                console.warn(`⚠️ [WS-Bot] คิวเดี่ยวไม่สำเร็จ (${consecutiveErrors}/3): ${sMsg} -> ข้ามและรันต่อ`);
+              }
+            } else {
+              consecutiveErrors++;
+            }
           }
 
-          const tx = await writeContract.processCloneQueue(iterationsToRun, { gasLimit });
-          console.log(
-            `⏳ [WS-Bot] ส่ง TX สำเร็จ: ${tx.hash} (GasLimit: ${gasLimit.toString()}) | รอการยืนยันบล็อก...`
-          );
-          await tx.wait(1);
-          console.log(`✅ [WS-Bot] ประมวลผลคิวโคลนสำเร็จ! TX: ${tx.hash}`);
           pendingCloneCount = await readContract.getPendingCloneCount().catch(() => 0n);
         }
       } else {
@@ -379,25 +407,52 @@ export async function checkAndProcessPendingQueues(triggerSource: string): Promi
                 `⚡ [WS-Bot] (${triggerSource}) รหัสหลัก #${mId} มียอด Auto ID Pool ครบเกณฑ์ (${ethers.formatUnits(autoIdPoolBig, 18)} U) -> สั่งรัน checkAndProcessAutoNewMainIdForNode(${mId})...`
               );
               try {
-                const autoTx = await writeContract.checkAndProcessAutoNewMainIdForNode(mId);
+                let autoGasLimit = 800000n;
+                try {
+                  const estAuto = await writeContract.checkAndProcessAutoNewMainIdForNode.estimateGas(mId);
+                  const bufAuto = (estAuto * 120n) / 100n;
+                  autoGasLimit = bufAuto > 4000000n ? 4000000n : bufAuto;
+                } catch {
+                  autoGasLimit = 800000n;
+                }
+                const autoTx = await writeContract.checkAndProcessAutoNewMainIdForNode(mId, { gasLimit: autoGasLimit });
                 await autoTx.wait(1);
                 console.log(`✅ [WS-Bot] สร้าง Auto ID สำเร็จสำหรับ Main #${mId}! TX: ${autoTx.hash}`);
               } catch (txErr: unknown) {
                 const txMsg = txErr instanceof Error ? txErr.message : String(txErr);
-                console.log(`⚠️ [WS-Bot] checkAndProcessAutoNewMainIdForNode(${mId}) notice: ${txMsg}`);
+                console.log(`⚠️ [WS-Bot] checkAndProcessAutoNewMainIdForNode(${mId}) notice (ทำงานต่อ): ${txMsg}`);
               }
             }
 
             if (minExtraPriceBig > 0n && extraIdPoolBig >= minExtraPriceBig) {
               console.log(
-                `⚡ [WS-Bot] (${triggerSource}) รหัสหลัก #${mId} มียอด Extra ID Pool ถึงเกณฑ์ -> สั่งรัน processPendingExtraIdQueue(${mId}, 2)...`
+                `⚡ [WS-Bot] (${triggerSource}) รหัสหลัก #${mId} มียอด Extra ID Pool ถึงเกณฑ์ -> สั่งรันสร้าง Extra ID...`
               );
-              const extraTx = await writeContract.processPendingExtraIdQueue(mId, 2);
-              await extraTx.wait(1);
-              console.log(`✅ [WS-Bot] สร้าง Extra ID สำเร็จสำหรับ Main #${mId}! TX: ${extraTx.hash}`);
+              try {
+                let extraTx: any = null;
+                try {
+                  const estExtra = await writeContract.processPendingExtraIdQueue.estimateGas(mId, 2);
+                  const bufExtra = (estExtra * 120n) / 100n;
+                  const extraGasLimit = bufExtra > 4500000n ? 4500000n : bufExtra < 800000n ? 800000n : bufExtra;
+                  extraTx = await writeContract.processPendingExtraIdQueue(mId, 2, { gasLimit: extraGasLimit });
+                } catch {
+                  const curR = Math.max(4, Number(pools.currentRank || 4));
+                  const estNodeExtra = await writeContract.checkAndProcessAutoExtraIdForNode.estimateGas(nodeData.owner, curR, mId);
+                  const bufNodeExtra = (estNodeExtra * 120n) / 100n;
+                  const nodeExtraGas = bufNodeExtra > 5500000n ? 5500000n : bufNodeExtra < 1000000n ? 1000000n : bufNodeExtra;
+                  extraTx = await writeContract.checkAndProcessAutoExtraIdForNode(nodeData.owner, curR, mId, { gasLimit: nodeExtraGas });
+                }
+                if (extraTx) {
+                  await extraTx.wait(1);
+                  console.log(`✅ [WS-Bot] สร้าง Extra ID สำเร็จสำหรับ Main #${mId}! TX: ${extraTx.hash}`);
+                }
+              } catch (extraErr: unknown) {
+                const exMsg = extraErr instanceof Error ? extraErr.message : String(extraErr);
+                console.log(`⚠️ [WS-Bot] AutoExtraId(${mId}) notice (ทำงานต่อ): ${exMsg}`);
+              }
             }
           } catch {
-            // ข้ามโหนดที่ไม่เข้าเงื่อนไขหรือเกิดข้อผิดพลาดชั่วคราว
+            // ข้ามโหนดที่ไม่เข้าเงื่อนไขหรือเกิดข้อผิดพลาดชั่วคราว และทำงานต่อ
           }
         }
       } catch (poolErr: unknown) {
@@ -413,6 +468,8 @@ export async function checkAndProcessPendingQueues(triggerSource: string): Promi
     isProcessingQueue = false;
   }
 }
+
+export const checkAndClearQueue = checkAndProcessPendingQueues;
 
 // ============================================================================
 // 8. ฟังก์ชันหลักสำหรับเชื่อมต่อ WebSocket และผูก Event Listener (connectWebSocket)
