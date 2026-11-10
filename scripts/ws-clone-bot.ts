@@ -30,7 +30,7 @@ const CONTRACT_ADDRESS =
   process.env.OVERRIDE_CONTRACT_ADDRESS ||
   process.env.CONTRACT_ADDRESS ||
   process.env.VITE_CONTRACT_ADDRESS ||
-  '0xED264d4CF339DdC19a0D28206a5f3aed0e1ebB3e';
+  '0x9ed96AF9128f0791fD883Dee7ADe2C728d2CeC11';
 
 const WSS_ENDPOINTS = [
   process.env.WSS_URL || 'wss://bsc-testnet-rpc.publicnode.com',
@@ -50,7 +50,8 @@ const INITIAL_DELAY_MS = Number(process.env.INITIAL_RECONNECT_DELAY_MS || 2000);
 const MAX_DELAY_MS = Number(process.env.MAX_RECONNECT_DELAY_MS || 60000);
 const HEARTBEAT_INTERVAL_MS = Number(process.env.HEARTBEAT_INTERVAL_MS || 30000);
 const HEARTBEAT_TIMEOUT_MS = 10000;
-const MAX_CLONE_BATCH_SIZE = 5;
+const BATCH_SIZE = BigInt(process.env.BATCH_SIZE || 3);
+const MAX_CLONE_BATCH_SIZE = Number(process.env.BATCH_SIZE || 3);
 
 // ============================================================================
 // 2. ABI สำหรับการดักฟัง Event และการสั่งประมวลผลคิวโคลน / Auto ID / Extra ID
@@ -246,13 +247,25 @@ export async function checkAndProcessPendingQueues(triggerSource: string): Promi
         const writeContract = new ethers.Contract(CONTRACT_ADDRESS, BOT_CONTRACT_ABI, botWallet);
 
         while (pendingCloneCount > 0n) {
-          const batchSize =
-            pendingCloneCount > BigInt(MAX_CLONE_BATCH_SIZE)
-              ? BigInt(MAX_CLONE_BATCH_SIZE)
-              : pendingCloneCount;
-          console.log(`🚀 [WS-Bot] กำลังส่งธุรกรรม processCloneQueue(${batchSize}) ผ่าน HTTP RPC...`);
-          const tx = await writeContract.processCloneQueue(batchSize);
-          console.log(`⏳ [WS-Bot] ส่ง TX สำเร็จ: ${tx.hash} | รอการยืนยันบล็อก...`);
+          const iterationsToRun =
+            pendingCloneCount < BATCH_SIZE ? pendingCloneCount : BATCH_SIZE;
+          console.log(
+            `⏳ [WS-Bot] (${triggerSource}) กำลังรันคิวจำนวน ${iterationsToRun.toString()} รายการเพื่อประหยัด Gas...`
+          );
+
+          // ตรวจสอบ Gas Limit ตอนส่งธุรกรรม: คำนวณ estimateGas และเผื่อ Buffer 20%
+          let gasLimit = 600000n;
+          try {
+            const estGas = await writeContract.processCloneQueue.estimateGas(iterationsToRun);
+            gasLimit = (estGas * 120n) / 100n;
+          } catch {
+            gasLimit = 600000n;
+          }
+
+          const tx = await writeContract.processCloneQueue(iterationsToRun, { gasLimit });
+          console.log(
+            `⏳ [WS-Bot] ส่ง TX สำเร็จ: ${tx.hash} (GasLimit: ${gasLimit.toString()}) | รอการยืนยันบล็อก...`
+          );
           await tx.wait(1);
           console.log(`✅ [WS-Bot] ประมวลผลคิวโคลนสำเร็จ! TX: ${tx.hash}`);
           pendingCloneCount = await readContract.getPendingCloneCount().catch(() => 0n);

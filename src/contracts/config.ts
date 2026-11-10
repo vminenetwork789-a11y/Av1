@@ -1,5 +1,5 @@
 export const DEFAULT_CONTRACT_ADDRESS =
-  import.meta.env?.VITE_CONTRACT_ADDRESS || '0xED264d4CF339DdC19a0D28206a5f3aed0e1ebB3e';
+  import.meta.env?.VITE_CONTRACT_ADDRESS || '0x9ed96AF9128f0791fD883Dee7ADe2C728d2CeC11';
 export const DEFAULT_USDT_ADDRESS =
   import.meta.env?.VITE_USDT_ADDRESS || '0x05f24E1F598DF1aE8d0B424ce978f8ea33bB752b';
 
@@ -41,6 +41,7 @@ const LEGACY_CONTRACT_ADDRESSES = new Set([
   '0x3b69efbd1f615cd31e326497555bfa56a194f935',
   '0xda9da3b56b75f5d59ac0b17b402e79dd3dddffba',
   '0x05cf73c0b412e17fac31305936d25a7fa1622771',
+  '0xed264d4cf339ddc19a0d28206a5f3aed0e1ebb3e',
 ]);
 
 const LEGACY_USDT_ADDRESSES = new Set([
@@ -279,6 +280,8 @@ export const MATRIX_ABI = [
   'function checkAndProcessAutoNewMainIdForNode(uint256 _mainNodeId) external',
   'function checkAndProcessAutoExtraId(address _user, uint8 _currentRank) external',
   'function checkAndProcessAutoExtraIdForNode(address _user, uint8 _currentRank, uint256 _sponsorNodeId) external',
+  'function getPendingCloneCount() external view returns (uint256)',
+  'function processCloneQueue(uint256 _maxIterations) external',
   'function processPendingExtraIdQueue(uint256 _r1MainId, uint8 _maxBatch) external returns (uint8 processed)',
   'function adminUpgradeRank(address _user, uint8 _targetRank) external',
   'function adminUpgradeRankForMainId(uint256 _r1MainId, uint8 _targetRank) external',

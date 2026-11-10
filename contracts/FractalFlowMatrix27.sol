@@ -145,6 +145,18 @@ contract FractalFlowMatrix27 is Ownable, ReentrancyGuard {
     mapping(uint256 => uint256) public mainIdExtraPoolBonus;
     mapping(uint256 => uint8) public mainIdNextExtraRank;
 
+    struct PendingCloneItem {
+        uint8 rank;
+        address parentOwner;
+        address parentSponsor;
+        uint256 cloneOriginMainId;
+        uint256 targetSponsorNodeId;
+        uint256 r1SponsorId;
+    }
+
+    PendingCloneItem[] public pendingCloneQueue;
+    uint256 public cloneQueueHead;
+
     // Custom errors for bytecode compression
     error ErrInvalidSponsor();
     error ErrNotOwner();
@@ -178,6 +190,8 @@ contract FractalFlowMatrix27 is Ownable, ReentrancyGuard {
     event AutoExtraIdCreated(address indexed user, uint8 rank, uint256 newNodeId);
     event AutoNewMainIdCreated(address indexed user, uint256 count, uint256 totalUsedFromVault);
     event BatchRegistered(address indexed user, uint256 count, uint256 totalPaid);
+    event CloneQueued(uint8 indexed rank, uint256 indexed originMainId, uint256 targetSponsorNodeId);
+    event CloneQueueProcessed(uint256 processedCount, uint256 remainingCount);
 
     constructor(
         address _usdt,
@@ -448,6 +462,68 @@ contract FractalFlowMatrix27 is Ownable, ReentrancyGuard {
         processPendingExtraIdQueue(r1MainId, 1);
     }
 
+    function getPendingCloneCount() external view returns (uint256) {
+        uint256 total = pendingCloneQueue.length;
+        uint256 head = cloneQueueHead;
+        if (total <= head) return 0;
+        unchecked {
+            return total - head;
+        }
+    }
+
+    function processCloneQueue(uint256 _maxIterations) external nonReentrant {
+        uint256 total = pendingCloneQueue.length;
+        uint256 head = cloneQueueHead;
+        if (total <= head || _maxIterations == 0) return;
+
+        uint256 available;
+        unchecked {
+            available = total - head;
+        }
+        uint256 iterations = _maxIterations < available ? _maxIterations : available;
+
+        for (uint256 i = 0; i < iterations;) {
+            uint256 idx;
+            unchecked {
+                idx = head + i;
+            }
+            // 1. ดึงข้อมูลตัวแปร Storage มาไว้ใน Memory เพื่อประหยัดแก๊ส (SLOAD ครั้งเดียว)
+            PendingCloneItem memory item = pendingCloneQueue[idx];
+
+            if (item.parentOwner != address(0)) {
+                _createAndPlaceCloneNode(
+                    item.rank,
+                    item.parentOwner,
+                    item.parentSponsor,
+                    item.cloneOriginMainId,
+                    item.targetSponsorNodeId,
+                    item.r1SponsorId
+                );
+                delete pendingCloneQueue[idx]; // Gas refund จากการลบ Storage
+            }
+
+            // 2. ใช้ unchecked สำหรับตัวแปรนับรอบ (i) เพื่อประหยัด Gas ในการเช็ก Overflow
+            unchecked {
+                ++i;
+            }
+        }
+
+        unchecked {
+            head += iterations;
+        }
+        cloneQueueHead = head;
+
+        if (head >= pendingCloneQueue.length) {
+            delete pendingCloneQueue;
+            cloneQueueHead = 0;
+            emit CloneQueueProcessed(iterations, 0);
+        } else {
+            unchecked {
+                emit CloneQueueProcessed(iterations, pendingCloneQueue.length - head);
+            }
+        }
+    }
+
     function processPendingExtraIdQueue(uint256 _r1MainId, uint8 _maxBatch) public returns (uint8 processed) {
         if (_r1MainId == 0 || _r1MainId > totalNodesInRank[1]) return 0;
         address nodeOwner = rankNodes[1][_r1MainId].owner;
@@ -457,21 +533,28 @@ contract FractalFlowMatrix27 is Ownable, ReentrancyGuard {
         (uint8 window5Start, ) = getFiveRankWindow(mainMaxRank);
         uint8 limit = _maxBatch == 0 || _maxBatch > 2 ? 2 : _maxBatch;
 
-        for (uint8 pass = 0; pass < limit; pass++) {
+        for (uint8 pass = 0; pass < limit;) {
             bool spawned = false;
-            for (uint8 targetRank = MAX_RANK; targetRank >= 2; targetRank--) {
+            for (uint8 targetRank = MAX_RANK; targetRank >= 2;) {
                 uint256 pool = _calcExtraPool(_r1MainId, mainMaxRank, window5Start);
                 uint256 price = rankPrice[targetRank];
-                if (price == 0 || pool < price) continue;
-                if (getMainIdNodeInRank(_r1MainId, targetRank) == 0) continue;
-
-                _deductExtraPool(_r1MainId, nodeOwner, price, mainMaxRank, window5Start);
-                _spawnExtraNode(_r1MainId, nodeOwner, targetRank);
-                spawned = true;
-                processed++;
-                break;
+                if (price != 0 && pool >= price && getMainIdNodeInRank(_r1MainId, targetRank) != 0) {
+                    _deductExtraPool(_r1MainId, nodeOwner, price, mainMaxRank, window5Start);
+                    _spawnExtraNode(_r1MainId, nodeOwner, targetRank);
+                    spawned = true;
+                    unchecked {
+                        ++processed;
+                    }
+                    break;
+                }
+                unchecked {
+                    --targetRank;
+                }
             }
             if (!spawned) break;
+            unchecked {
+                ++pass;
+            }
         }
     }
 
@@ -524,10 +607,13 @@ contract FractalFlowMatrix27 is Ownable, ReentrancyGuard {
         (uint8 window5Start, ) = getFiveRankWindow(currentRank);
 
         uint256 autoIdPool = 0;
-        for (uint8 r = 1; r <= 3; r++) {
+        for (uint8 r = 1; r <= 3;) {
             if (r < window5Start) {
                 uint256 nId = getMainIdNodeInRank(r1MainId, r);
                 if (nId > 0) autoIdPool += nodeUpgradeVault[r][nId];
+            }
+            unchecked {
+                ++r;
             }
         }
 
@@ -540,8 +626,11 @@ contract FractalFlowMatrix27 is Ownable, ReentrancyGuard {
                 uint8 endR = window5Start > 3 ? 3 : (window5Start > 1 ? window5Start - 1 : 1);
                 _deductVaultRange(r1MainId, nodeOwner, 1, endR, totalDeduct);
 
-                for (uint256 i = 0; i < count; i++) {
+                for (uint256 i = 0; i < count;) {
                     _createAndPlaceAutoNode(1, nodeOwner, nodeOwner, r1MainId, false);
+                    unchecked {
+                        ++i;
+                    }
                 }
 
                 emit AutoNewMainIdCreated(nodeOwner, count, totalDeduct);
@@ -569,20 +658,24 @@ contract FractalFlowMatrix27 is Ownable, ReentrancyGuard {
         (bool isValid, , address sponsorAddr) = checkValidSponsorId(_sponsorNodeId);
         if (!isValid) revert ErrInvalidSponsor();
 
-        uint256 totalCost = rankPrice[1] * _count;
+        uint256 r1Price = rankPrice[1];
+        uint256 totalCost = r1Price * _count;
         usdt.safeTransferFrom(msg.sender, address(this), totalCost);
         _ensureRegistered(msg.sender, sponsorAddr, _sponsorNodeId);
 
         uint256 firstCreated = 0;
         bool hasTargets = _targetParentIds.length == _count && _isLefts.length == _count && _isClones.length == _count;
 
-        for (uint256 i = 0; i < _count; i++) {
+        for (uint256 i = 0; i < _count;) {
             uint256 pId = hasTargets ? _targetParentIds[i] : 0;
             bool isL = hasTargets ? _isLefts[i] : true;
             bool isC = hasTargets ? _isClones[i] : false;
 
             uint256 nId = _insertBatchItem(_sponsorNodeId, sponsorAddr, pId, isL, isC);
             if (firstCreated == 0) firstCreated = nId;
+            unchecked {
+                ++i;
+            }
         }
 
         emit UserRegistered(msg.sender, sponsorAddr, _sponsorNodeId, firstCreated);
@@ -945,10 +1038,14 @@ contract FractalFlowMatrix27 is Ownable, ReentrancyGuard {
 
         uint256 total = totalNodesInRank[_rank];
         // 2. Direct sponsor's clone nodes (check direct leftChild / rightChild across all sponsor clones first)
-        for (uint256 id = 1; id <= total; id++) {
+        for (uint256 id = 1; id <= total;) {
             if (_isSpClone(_rank, id, originTag, primaryNodeId)) {
-                if (rankNodes[_rank][id].leftChild == 0) return (id, true);
-                if (rankNodes[_rank][id].rightChild == 0) return (id, false);
+                MatrixNode memory cNode = rankNodes[_rank][id];
+                if (cNode.leftChild == 0) return (id, true);
+                if (cNode.rightChild == 0) return (id, false);
+            }
+            unchecked {
+                ++id;
             }
         }
 
@@ -984,7 +1081,7 @@ contract FractalFlowMatrix27 is Ownable, ReentrancyGuard {
 
         while (head < tail) {
             uint256 currentId = queue[head++];
-            MatrixNode storage node = rankNodes[_rank][currentId];
+            MatrixNode memory node = rankNodes[_rank][currentId];
 
             if (node.leftChild == 0) return (currentId, true);
             if (node.rightChild == 0) return (currentId, false);
@@ -1093,13 +1190,16 @@ contract FractalFlowMatrix27 is Ownable, ReentrancyGuard {
         uint256 currentUplineId = _parentId;
         uint256 unpaidLevelAmount = 0;
 
-        for (uint8 i = 1; i <= MAX_LEVELS; i++) {
+        for (uint8 i = 1; i <= MAX_LEVELS;) {
             if (currentUplineId != 0) {
-                address uplineOwner = rankNodes[_rank][currentUplineId].owner;
-                _payAndEmit(_fromNodeId, currentUplineId, uplineOwner, _rank, "LEVEL", levelRewardPerTier);
-                currentUplineId = rankNodes[_rank][currentUplineId].parentId;
+                MatrixNode memory upline = rankNodes[_rank][currentUplineId];
+                _payAndEmit(_fromNodeId, currentUplineId, upline.owner, _rank, "LEVEL", levelRewardPerTier);
+                currentUplineId = upline.parentId;
             } else {
                 unpaidLevelAmount += levelRewardPerTier;
+            }
+            unchecked {
+                ++i;
             }
         }
 
@@ -1161,6 +1261,20 @@ contract FractalFlowMatrix27 is Ownable, ReentrancyGuard {
             targetSponsorNodeId = r1SponsorId != 0 ? r1SponsorId : 1;
         } else if (r1SponsorId > 0) {
             targetSponsorNodeId = getMainIdNodeInRank(r1SponsorId, _rank);
+        }
+
+        // หากแก๊สเหลือจำกัด ให้พักเข้าคิว Pending Clone เพื่อป้องกัน Out-of-Gas และให้ Bot หรือผู้ใช้ประมวลผลเป็น Batch
+        if (gasleft() < 350000) {
+            pendingCloneQueue.push(PendingCloneItem({
+                rank: _rank,
+                parentOwner: parentOwner,
+                parentSponsor: parentSponsor,
+                cloneOriginMainId: cloneOriginMainId,
+                targetSponsorNodeId: targetSponsorNodeId,
+                r1SponsorId: r1SponsorId
+            }));
+            emit CloneQueued(_rank, cloneOriginMainId, targetSponsorNodeId);
+            return;
         }
 
         _createAndPlaceCloneNode(_rank, parentOwner, parentSponsor, cloneOriginMainId, targetSponsorNodeId, r1SponsorId);
