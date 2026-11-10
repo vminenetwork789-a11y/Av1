@@ -2453,13 +2453,22 @@ async function checkAndProcessBotCloneQueue(triggerReason) {
     if (pendingCount > 0n && BOT_PRIVATE_KEY && BOT_PRIVATE_KEY.length >= 64) {
       const botSigner = new ethers.Wallet(BOT_PRIVATE_KEY, httpProvider);
       const writeContract = new ethers.Contract(CONTRACT_ADDRESS, WS_BOT_ABI, botSigner);
-      const batchSize = pendingCount > 5n ? 5n : pendingCount;
-      console.log(
-        `\u{1F680} [WS-Bot] (${triggerReason}) \u0E2A\u0E48\u0E07\u0E18\u0E38\u0E23\u0E01\u0E23\u0E23\u0E21 processCloneQueue(${batchSize.toString()}) \u0E1C\u0E48\u0E32\u0E19 HTTP Provider...`
-      );
-      const tx = await writeContract.processCloneQueue(batchSize);
-      await tx.wait(1);
-      recordWsBotEvent("processCloneQueue", `TX: ${tx.hash} (Batch: ${batchSize.toString()})`);
+      let loopSafety = 0;
+      while (pendingCount > 0n && loopSafety < 20) {
+        loopSafety++;
+        const batchSize = pendingCount > 5n ? 5n : pendingCount;
+        console.log(
+          `\u{1F680} [WS-Bot] (${triggerReason}) \u0E01\u0E33\u0E25\u0E31\u0E07\u0E1B\u0E23\u0E30\u0E21\u0E27\u0E25\u0E1C\u0E25 Chunked Queue \u0E23\u0E2D\u0E1A\u0E17\u0E35\u0E48 ${loopSafety}: processCloneQueue(${batchSize.toString()}) | \u0E04\u0E07\u0E40\u0E2B\u0E25\u0E37\u0E2D ${pendingCount.toString()}`
+        );
+        const tx = await writeContract.processCloneQueue(batchSize);
+        await tx.wait(1);
+        recordWsBotEvent("processCloneQueue", `TX: ${tx.hash} (Batch: ${batchSize.toString()}, Remaining: ${(pendingCount - batchSize).toString()})`);
+        try {
+          pendingCount = await readContract.getPendingCloneCount();
+        } catch {
+          break;
+        }
+      }
     }
     if (triggerMatrixDatabaseSync) {
       await triggerMatrixDatabaseSync(CONTRACT_ADDRESS, false);

@@ -3330,13 +3330,22 @@ async function checkAndProcessBotCloneQueue(triggerReason: string): Promise<void
     if (pendingCount > 0n && BOT_PRIVATE_KEY && BOT_PRIVATE_KEY.length >= 64) {
       const botSigner = new ethers.Wallet(BOT_PRIVATE_KEY, httpProvider);
       const writeContract = new ethers.Contract(CONTRACT_ADDRESS, WS_BOT_ABI, botSigner);
-      const batchSize = pendingCount > 5n ? 5n : pendingCount;
-      console.log(
-        `🚀 [WS-Bot] (${triggerReason}) ส่งธุรกรรม processCloneQueue(${batchSize.toString()}) ผ่าน HTTP Provider...`
-      );
-      const tx = await writeContract.processCloneQueue(batchSize);
-      await tx.wait(1);
-      recordWsBotEvent('processCloneQueue', `TX: ${tx.hash} (Batch: ${batchSize.toString()})`);
+      let loopSafety = 0;
+      while (pendingCount > 0n && loopSafety < 20) {
+        loopSafety++;
+        const batchSize = pendingCount > 5n ? 5n : pendingCount;
+        console.log(
+          `🚀 [WS-Bot] (${triggerReason}) กำลังประมวลผล Chunked Queue รอบที่ ${loopSafety}: processCloneQueue(${batchSize.toString()}) | คงเหลือ ${pendingCount.toString()}`
+        );
+        const tx = await writeContract.processCloneQueue(batchSize);
+        await tx.wait(1);
+        recordWsBotEvent('processCloneQueue', `TX: ${tx.hash} (Batch: ${batchSize.toString()}, Remaining: ${(pendingCount - batchSize).toString()})`);
+        try {
+          pendingCount = await readContract.getPendingCloneCount();
+        } catch {
+          break;
+        }
+      }
     }
 
     // ซิงค์ข้อมูลบล็อกเชนลงฐานข้อมูลทันทีเพื่อให้หน้าเว็บอัปเดตแบบเรียลไทม์
