@@ -34,6 +34,9 @@ import {
   Coins,
   ChevronDown,
   ChevronUp,
+  ChevronLeft,
+  ChevronRight,
+  MoveHorizontal,
   X,
   Maximize2,
   Shield,
@@ -1057,6 +1060,12 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
 
   const scrollViewportRef = useRef<HTMLDivElement | null>(null);
   const treeContentRef = useRef<HTMLDivElement | null>(null);
+  const rankScrollRef = useRef<HTMLDivElement | null>(null);
+  const [canScrollLeft, setCanScrollLeft] = useState<boolean>(false);
+  const [canScrollRight, setCanScrollRight] = useState<boolean>(false);
+  const [isTreeOverflowingX, setIsTreeOverflowingX] = useState<boolean>(false);
+  const [scrollProgressPct, setScrollProgressPct] = useState<number>(50);
+  const [hasSwipedTree, setHasSwipedTree] = useState<boolean>(false);
   const [connectorLines, setConnectorLines] = useState<ConnectorLine[]>([]);
   const [isCloneStatusPopupOpen, setIsCloneStatusPopupOpen] = useState<boolean>(false);
   const [isLevelSummaryPopupOpen, setIsLevelSummaryPopupOpen] = useState<boolean>(false);
@@ -2731,6 +2740,52 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
             ? rep.autoIdsSpawned.length
             : Number(rep?.totalAutoIdCount || 0);
           const spawnedCount = Math.max(maxPossibleSpawns, repSpawnedCount);
+
+          // For Root Main ID #1 (which starts at Rank 27 and never pays for rank upgrades),
+          // ensure totalRem1To3 and per-rank snapshot vaults equal totalGross1To3 - spawnedCount * 5
+          if (r1Id === 1 && totalGross1To3 > 0) {
+            const expectedRem1To3 = Math.max(
+              0,
+              Number((totalGross1To3 - spawnedCount * 5).toFixed(4))
+            );
+            let missingRem = Number((expectedRem1To3 - totalRem1To3).toFixed(4));
+            if (missingRem > 1e-4) {
+              remParts.length = 0;
+              totalRem1To3 = 0;
+              extraR2To3Rem = 0;
+              for (let r = 1; r <= 3; r++) {
+                if (r >= window5Start) continue;
+                const snapR = multiRankSnapshots.get(r);
+                const rootSnapInR = snapR?.get(1);
+                if (!snapR || !rootSnapInR) continue;
+                const rUnitVault = (RANK_PRICES_USDT[r - 1] || 5) * 0.35;
+                let lcInR = 0;
+                for (const sn of snapR.values()) {
+                  const isSnRoot = sn.id === 1 || (sn.isClone && (sn.originMainId === 1 || sn.id === 1));
+                  if (isSnRoot && sn.leftChild > 0) lcInR++;
+                }
+                const gR = Number((lcInR * rUnitVault).toFixed(4));
+                let curV = Number((rootSnapInR.nodeVault ?? 0).toFixed(4));
+                const room = Math.max(0, Number((gR - curV).toFixed(4)));
+                if (missingRem > 1e-4 && room > 1e-4) {
+                  const addV = Number(Math.min(room, missingRem).toFixed(4));
+                  curV = Number((curV + addV).toFixed(4));
+                  rootSnapInR.nodeVault = curV;
+                  if (r === activeRank) {
+                    onChainNodeVaultMap.set(1, curV);
+                  }
+                  missingRem = Number((missingRem - addV).toFixed(4));
+                }
+                if (gR > 0 || curV > 0) {
+                  totalRem1To3 = Number((totalRem1To3 + curV).toFixed(4));
+                  if (r > 1) {
+                    extraR2To3Rem = Number((extraR2To3Rem + curV).toFixed(4));
+                  }
+                  remParts.push(`R${r}: ${curV.toFixed(2)}`);
+                }
+              }
+            }
+          }
 
           crossRankGrossVault1To4.set(r1Id, totalGross1To3);
           crossRankRemVault1To4.set(r1Id, totalRem1To3);
@@ -4715,6 +4770,40 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
     });
   }, [activeNodesMap, zoomScale]);
 
+  const updateTreeScrollIndicators = useCallback((markUserSwipe = false) => {
+    const viewportEl = scrollViewportRef.current;
+    if (!viewportEl) return;
+    const maxScrollLeft = Math.max(0, viewportEl.scrollWidth - viewportEl.clientWidth);
+    const currentLeft = Math.max(0, viewportEl.scrollLeft);
+    const overflowing = maxScrollLeft > 8;
+    setIsTreeOverflowingX(overflowing);
+    setCanScrollLeft(overflowing && currentLeft > 6);
+    setCanScrollRight(overflowing && currentLeft < maxScrollLeft - 6);
+    setScrollProgressPct(
+      overflowing && maxScrollLeft > 0
+        ? Math.min(100, Math.max(0, Math.round((currentLeft / maxScrollLeft) * 100)))
+        : 50
+    );
+    if (markUserSwipe && overflowing) {
+      setHasSwipedTree(true);
+    }
+  }, []);
+
+  const scrollTreeHorizontally = useCallback((direction: 'left' | 'right' | 'center') => {
+    const viewportEl = scrollViewportRef.current;
+    if (!viewportEl) return;
+    const maxScrollLeft = Math.max(0, viewportEl.scrollWidth - viewportEl.clientWidth);
+    const step = Math.max(160, Math.round(viewportEl.clientWidth * 0.65));
+    const targetLeft =
+      direction === 'center'
+        ? Math.floor(maxScrollLeft / 2)
+        : direction === 'left'
+        ? Math.max(0, viewportEl.scrollLeft - step)
+        : Math.min(maxScrollLeft, viewportEl.scrollLeft + step);
+    viewportEl.scrollTo({ left: targetLeft, behavior: 'smooth' });
+    setHasSwipedTree(true);
+  }, []);
+
   // Reset horizontal scroll position to center Root Node whenever rank, viewMode, or focusRootId changes
   useLayoutEffect(() => {
     const viewportEl = scrollViewportRef.current;
@@ -4722,18 +4811,24 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
     const centerScroll = () => {
       const maxScrollLeft = Math.max(0, viewportEl.scrollWidth - viewportEl.clientWidth);
       viewportEl.scrollLeft = maxScrollLeft > 0 ? Math.floor(maxScrollLeft / 2) : 0;
+      updateTreeScrollIndicators(false);
     };
     centerScroll();
-    const timer = setTimeout(centerScroll, 50);
+    const timer = setTimeout(centerScroll, 60);
     return () => clearTimeout(timer);
-  }, [selectedRank, viewMode, focusRootId]);
+  }, [selectedRank, viewMode, focusRootId, updateTreeScrollIndicators]);
 
   useLayoutEffect(() => {
     recalculateTreeConnectors();
-    const timer = setTimeout(recalculateTreeConnectors, 60);
+    updateTreeScrollIndicators(false);
+    const timer = setTimeout(() => {
+      recalculateTreeConnectors();
+      updateTreeScrollIndicators(false);
+    }, 60);
     return () => clearTimeout(timer);
   }, [
     recalculateTreeConnectors,
+    updateTreeScrollIndicators,
     focusRootId,
     expandedBenefitNodeId,
     viewMode,
@@ -4748,14 +4843,19 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
     if (!containerEl || typeof ResizeObserver === 'undefined') return;
     const observer = new ResizeObserver(() => {
       recalculateTreeConnectors();
+      updateTreeScrollIndicators(false);
     });
     observer.observe(containerEl);
-    window.addEventListener('resize', recalculateTreeConnectors);
+    const handleResize = () => {
+      recalculateTreeConnectors();
+      updateTreeScrollIndicators(false);
+    };
+    window.addEventListener('resize', handleResize);
     return () => {
       observer.disconnect();
-      window.removeEventListener('resize', recalculateTreeConnectors);
+      window.removeEventListener('resize', handleResize);
     };
-  }, [recalculateTreeConnectors]);
+  }, [recalculateTreeConnectors, updateTreeScrollIndicators]);
 
   const handleAutoFitScreen = useCallback(() => {
     const viewportEl = scrollViewportRef.current;
@@ -5507,9 +5607,9 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
   }
 
   return (
-    <div className="w-full max-w-none min-h-[calc(100vh-56px)] h-full flex flex-col bg-[#0b1020] border border-slate-800 rounded-xl sm:rounded-2xl p-2 sm:p-4 shadow-2xl space-y-2.5 sm:space-y-3">
+    <div className="w-full max-w-full min-w-0 overflow-hidden min-h-[calc(100vh-56px)] h-full flex flex-col bg-[#0b1020] border border-slate-800 rounded-xl sm:rounded-2xl p-2 sm:p-4 shadow-2xl space-y-2.5 sm:space-y-3">
       {/* Top Header & Controls Block (Stacked neatly matching screenshot) */}
-      <div className="flex flex-col gap-2.5 pb-3 border-b border-slate-800/90">
+      <div className="flex flex-col gap-2.5 pb-3 border-b border-slate-800/90 min-w-0 max-w-full">
         {/* Row 1: Title */}
         <div className="flex items-center justify-between gap-2 flex-wrap">
           <h2 className="text-base sm:text-lg font-extrabold text-white flex items-center gap-2">
@@ -6263,8 +6363,40 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
             </div>
           </div>
 
-          {/* Horizontal Scrollable Rank Buttons Bar (Design matching Screenshot: [✓ 👑 ผัง 1 62 5U] [✓ ผัง 2 4 10U] [👑 ผัง 3 2 20U] [ผัง 4 30U]) */}
-          <div className="w-full overflow-x-auto pb-2 pt-0.5 scrollbar-thin scrollbar-thumb-indigo-500/40 scrollbar-track-slate-950 flex items-center gap-2 select-none">
+          {/* Horizontal-Scroll-Only Rank Buttons Wrapper with Mobile Touch Indicators */}
+          <div className="relative w-full max-w-full min-w-0">
+            <div className="flex items-center justify-between gap-2 mb-1 sm:hidden px-0.5">
+              <span className="text-[10px] text-slate-400 flex items-center gap-1 font-medium">
+                <MoveHorizontal className="w-3 h-3 text-indigo-400 shrink-0" />
+                <span>ปัดซ้าย-ขวาเพื่อเลือกผัง 1–27</span>
+              </span>
+              <div className="flex items-center gap-1">
+                <button
+                  type="button"
+                  onClick={() =>
+                    rankScrollRef.current?.scrollBy({ left: -180, behavior: 'smooth' })
+                  }
+                  className="min-w-[28px] min-h-[28px] px-1.5 rounded-lg bg-slate-900 border border-slate-800 text-slate-300 flex items-center justify-center active:scale-95"
+                  aria-label="เลื่อนแถบแรงค์ไปทางซ้าย"
+                >
+                  <ChevronLeft className="w-3.5 h-3.5" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() =>
+                    rankScrollRef.current?.scrollBy({ left: 180, behavior: 'smooth' })
+                  }
+                  className="min-w-[28px] min-h-[28px] px-1.5 rounded-lg bg-slate-900 border border-slate-800 text-slate-300 flex items-center justify-center active:scale-95"
+                  aria-label="เลื่อนแถบแรงค์ไปทางขวา"
+                >
+                  <ChevronRight className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            </div>
+            <div
+              ref={rankScrollRef}
+              className="w-full max-w-full matrix-horizontal-scroll-only pb-2 pt-0.5 flex items-center gap-2 select-none"
+            >
             {RANK_PRICES_USDT.map((price, idx) => {
               const r = idx + 1;
               const isSelected = selectedRank === r;
@@ -6363,6 +6495,7 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
                 </button>
               );
             })}
+            </div>
           </div>
         </div>
       </div>
@@ -6501,11 +6634,111 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
         </div>
       )}
 
-      {/* 4. Main Full-Max Height & Full-Max Width Binary Tree Viewport */}
-      <div className="relative w-full max-w-none flex-1 flex flex-col min-h-[85vh]">
+      {/* 4. Main Horizontal-Scroll-Only Binary Tree Viewport with Mobile Touch Indicators */}
+      <div className="relative w-full max-w-full min-w-0 flex-1 flex flex-col min-h-[82vh] rounded-xl sm:rounded-2xl bg-[#080c17] border border-slate-800/90 overflow-hidden">
+        {/* Top Touch-Pan & Horizontal Scrollbar Indicator Strip */}
+        <div className="w-full bg-slate-950/95 border-b border-slate-800/80 px-2.5 py-1.5 flex items-center justify-between gap-2 z-20">
+          <div className="flex items-center gap-1.5 min-w-0">
+            <MoveHorizontal className="w-3.5 h-3.5 text-emerald-400 shrink-0 animate-pulse" />
+            <span className="text-[11px] sm:text-xs font-semibold text-slate-200 truncate">
+              {language === 'th'
+                ? 'ปัดซ้าย-ขวาเพื่อเลื่อนดูผังไบนารี่'
+                : 'Swipe left or right to pan tree'}
+            </span>
+          </div>
+
+          <div className="flex items-center gap-1.5 shrink-0">
+            <button
+              type="button"
+              onClick={() => scrollTreeHorizontally('left')}
+              disabled={!canScrollLeft}
+              className="min-h-[34px] min-w-[34px] sm:min-h-[30px] sm:min-w-[30px] px-2 rounded-lg bg-slate-900 hover:bg-slate-800 disabled:opacity-35 border border-slate-700/80 text-slate-200 text-[11px] font-bold flex items-center justify-center gap-0.5 transition cursor-pointer"
+              title="เลื่อนผังไปทางซ้าย"
+            >
+              <ChevronLeft className="w-3.5 h-3.5 text-cyan-300" />
+              <span className="hidden xs:inline">ซ้าย</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => scrollTreeHorizontally('center')}
+              className="min-h-[34px] sm:min-h-[30px] px-2.5 rounded-lg bg-indigo-950/90 hover:bg-indigo-900 border border-indigo-500/40 text-indigo-200 text-[11px] font-bold flex items-center justify-center gap-1 transition cursor-pointer"
+              title="จัดโหนดหลักให้อยู่กึ่งกลางจอ"
+            >
+              <span>กึ่งกลาง</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => scrollTreeHorizontally('right')}
+              disabled={!canScrollRight}
+              className="min-h-[34px] min-w-[34px] sm:min-h-[30px] sm:min-w-[30px] px-2 rounded-lg bg-slate-900 hover:bg-slate-800 disabled:opacity-35 border border-slate-700/80 text-slate-200 text-[11px] font-bold flex items-center justify-center gap-0.5 transition cursor-pointer"
+              title="เลื่อนผังไปทางขวา"
+            >
+              <span className="hidden xs:inline">ขวา</span>
+              <ChevronRight className="w-3.5 h-3.5 text-cyan-300" />
+            </button>
+          </div>
+        </div>
+
+        {/* Visual Horizontal Scroll Progress Track (shown when tree width exceeds screen width) */}
+        {isTreeOverflowingX && (
+          <div className="w-full h-1.5 bg-slate-900/90 relative overflow-hidden z-20">
+            <div
+              className="h-full bg-gradient-to-r from-indigo-500 via-cyan-400 to-emerald-400 rounded-full transition-all duration-150"
+              style={{
+                width: '32%',
+                marginLeft: `${Math.min(68, Math.max(0, Math.round(scrollProgressPct * 0.68)))}%`,
+              }}
+            />
+          </div>
+        )}
+
+        {/* Left Edge Overflow Shadow & Floating Touch Button */}
+        {canScrollLeft && (
+          <div className="pointer-events-none absolute inset-y-10 left-0 w-10 sm:w-12 bg-gradient-to-r from-[#080c17] via-[#080c17]/75 to-transparent z-20 flex items-center justify-start pl-1">
+            <button
+              type="button"
+              onClick={() => scrollTreeHorizontally('left')}
+              className="pointer-events-auto min-w-[40px] min-h-[40px] rounded-full bg-slate-900/90 hover:bg-indigo-600 border border-indigo-400/50 text-white shadow-[0_0_15px_rgba(0,0,0,0.75)] flex items-center justify-center active:scale-95 transition cursor-pointer"
+              aria-label="เลื่อนผังไปทางซ้าย"
+            >
+              <ChevronLeft className="w-5 h-5 text-cyan-300" />
+            </button>
+          </div>
+        )}
+
+        {/* Right Edge Overflow Shadow & Floating Touch Button */}
+        {canScrollRight && (
+          <div className="pointer-events-none absolute inset-y-10 right-0 w-10 sm:w-12 bg-gradient-to-l from-[#080c17] via-[#080c17]/75 to-transparent z-20 flex items-center justify-end pr-1">
+            <button
+              type="button"
+              onClick={() => scrollTreeHorizontally('right')}
+              className="pointer-events-auto min-w-[40px] min-h-[40px] rounded-full bg-slate-900/90 hover:bg-indigo-600 border border-indigo-400/50 text-white shadow-[0_0_15px_rgba(0,0,0,0.75)] flex items-center justify-center active:scale-95 transition cursor-pointer"
+              aria-label="เลื่อนผังไปทางขวา"
+            >
+              <ChevronRight className="w-5 h-5 text-cyan-300" />
+            </button>
+          </div>
+        )}
+
+        {/* Mobile Touch Gesture Floating Pill (auto-hides once user swipes horizontally) */}
+        {isTreeOverflowingX && !hasSwipedTree && (
+          <div
+            onClick={() => setHasSwipedTree(true)}
+            className="sm:hidden absolute top-12 left-1/2 -translate-x-1/2 z-20 px-3 py-1 rounded-full bg-slate-900/95 border border-cyan-400/50 text-cyan-200 text-[10.5px] font-bold shadow-lg flex items-center gap-1.5 cursor-pointer"
+          >
+            <MoveHorizontal className="w-3.5 h-3.5 text-cyan-400 animate-bounce" />
+            <span>แตะเลื่อนซ้าย-ขวาเพื่อดูโหนดทั้งหมด</span>
+          </div>
+        )}
+
+        {/* Horizontal-Scroll-Only Tree Wrapper */}
         <div
           ref={scrollViewportRef}
-          className="w-full max-w-none flex-1 min-h-[85vh] h-full rounded-xl sm:rounded-2xl bg-[#080c17] border border-slate-800/90 p-2 sm:p-5 md:p-6 pb-20 sm:pb-24 overflow-x-auto overflow-y-auto matrix-scroll-container"
+          onScroll={() => updateTreeScrollIndicators(true)}
+          onTouchMove={() => updateTreeScrollIndicators(true)}
+          className="w-full max-w-full min-w-0 flex-1 min-h-[78vh] h-full p-2 sm:p-5 md:p-6 pb-20 sm:pb-24 matrix-horizontal-scroll-only"
         >
           <div
             style={{

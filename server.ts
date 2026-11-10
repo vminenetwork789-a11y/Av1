@@ -2391,7 +2391,7 @@ function reconcileAutoExtraIdsAcrossRanks(runLocalCascades = true): Array<{
     deductedUsdt: number;
   }> = [];
 
-  // 1. Strip any previously synthesized Auto IDs / Extra IDs / Clones and restore on-chain base vaults on Rank 1..27 nodes
+  // 1. Strip any previously synthesized Auto IDs / Extra IDs / Clones and restore on-chain base vaults & links on Rank 1..27 nodes
   for (let r = 1; r <= 27; r++) {
     const rList = matrixDB.nodesByRank[r];
     if (!Array.isArray(rList) || rList.length === 0) continue;
@@ -2400,6 +2400,18 @@ function reconcileAutoExtraIdsAcrossRanks(runLocalCascades = true): Array<{
     );
     const realIds = new Set(realNodes.map((n) => n.id));
     for (const n of realNodes) {
+      if (typeof (n as any).onChainParentId === 'number') {
+        n.parentId = (n as any).onChainParentId;
+      }
+      if (typeof (n as any).onChainLeftChild === 'number') {
+        n.leftChild = (n as any).onChainLeftChild;
+      }
+      if (typeof (n as any).onChainRightChild === 'number') {
+        n.rightChild = (n as any).onChainRightChild;
+      }
+      if (typeof (n as any).onChainOrigMainId === 'number' && (n as any).onChainOrigMainId > 0) {
+        n.originMainId = (n as any).onChainOrigMainId;
+      }
       if (n.leftChild > 0 && !realIds.has(n.leftChild)) n.leftChild = 0;
       if (n.rightChild > 0 && !realIds.has(n.rightChild)) n.rightChild = 0;
       const baseOnChainVal = Number(
@@ -2503,6 +2515,69 @@ function reconcileAutoExtraIdsAcrossRanks(runLocalCascades = true): Array<{
     for (const [oKey, sumVal] of ownerVaultSums.entries()) {
       if (!matrixDB.userRankVaults[oKey]) matrixDB.userRankVaults[oKey] = {};
       matrixDB.userRankVaults[oKey][r] = sumVal;
+    }
+  }
+
+  // Reconcile Root Main ID #1 cumulative R1..R3 Pool 2 balance so canonical left-child vault (+1.75 U) is never lost when loaded from disk cache
+  {
+    const r1Root = (matrixDB.nodesByRank[1] || []).find((n) => n.id === 1 && !n.isClone && !n.isExtraId);
+    if (r1Root) {
+      let totalGross1To3 = 0;
+      let totalRem1To3 = 0;
+      const grossByR: Record<number, number> = { 1: 0, 2: 0, 3: 0 };
+      const rootNodeByR: Record<number, IndexedTreeNode | undefined> = {};
+
+      for (let r = 1; r <= 3; r++) {
+        const rList = matrixDB.nodesByRank[r] || [];
+        const rootInR = rList.find((n) => n.id === 1 && !n.isClone && !n.isExtraId);
+        rootNodeByR[r] = rootInR;
+        if (!rootInR) continue;
+        const rUnitVault = Number(((RANK_PRICES_USDT[r - 1] || 5) * 0.35).toFixed(4));
+        let lc = 0;
+        for (const rn of rList) {
+          const isRootOrClone = rn.id === 1 || (rn.isClone && (rn.originMainId === 1 || rn.id === 1));
+          if (isRootOrClone && rn.leftChild > 0) lc++;
+        }
+        const gR = Number((lc * rUnitVault).toFixed(4));
+        grossByR[r] = gR;
+        totalGross1To3 = Number((totalGross1To3 + gR).toFixed(4));
+        totalRem1To3 = Number((totalRem1To3 + Number(rootInR.nodeVault || 0)).toFixed(4));
+      }
+
+      const rootAutoCount = autoCountByMainId.get(1) || 0;
+      const expectedAutoDeduct = Number((rootAutoCount * 5.0).toFixed(4));
+      const expectedRem1To3 = Math.max(0, Number((totalGross1To3 - expectedAutoDeduct).toFixed(4)));
+      let missingRem = Number((expectedRem1To3 - totalRem1To3).toFixed(4));
+
+      if (missingRem > 1e-4) {
+        for (let r = 1; r <= 3 && missingRem > 1e-4; r++) {
+          const rootInR = rootNodeByR[r];
+          if (!rootInR) continue;
+          const curV = Number(rootInR.nodeVault || 0);
+          const room = Math.max(0, Number((grossByR[r] - curV).toFixed(4)));
+          if (room > 1e-4) {
+            const addV = Number(Math.min(room, missingRem).toFixed(4));
+            const nextV = Number((curV + addV).toFixed(4));
+            rootInR.nodeVault = nextV;
+            rootInR.rawNodeVault = nextV;
+            rootInR.reconciledBaseVault = nextV;
+            missingRem = Number((missingRem - addV).toFixed(4));
+            if (rootInR.owner && rootInR.owner !== ethers.ZeroAddress) {
+              const oKey = rootInR.owner.toLowerCase();
+              const rList = matrixDB.nodesByRank[r] || [];
+              let sumVal = 0;
+              for (const mNode of rList) {
+                if (mNode.isClone || mNode.isExtraId) continue;
+                if ((mNode.owner || '').toLowerCase() === oKey) {
+                  sumVal = Number((sumVal + Number(mNode.nodeVault || 0)).toFixed(4));
+                }
+              }
+              if (!matrixDB.userRankVaults[oKey]) matrixDB.userRankVaults[oKey] = {};
+              matrixDB.userRankVaults[oKey][r] = sumVal;
+            }
+          }
+        }
+      }
     }
   }
 
@@ -3731,14 +3806,32 @@ async function checkAndProcessBotCloneQueue(triggerReason: string): Promise<void
               continue;
             }
             const pools = await readContract.getMainIdThreePools(nodeData.owner, mId);
-            const autoIdPoolBig: bigint = pools.newAutoIdPool;
+            let autoIdPoolBig: bigint = pools.newAutoIdPool;
             const extraIdPoolBig: bigint = pools.newExtraIdPool;
 
+            // ตรวจสอบกับ Database API (5.75 U) เพื่อให้บอทไม่ติดค้างกรณียอดคำนวณในระบบครบ 5.00 USDT แล้ว
+            if (autoIdPoolBig < r1PriceBig) {
+              const r1Node = (matrixDB.nodesByRank[1] || []).find((x) => x.id === mId && !x.isClone && !x.isExtraId);
+              if (r1Node) {
+                const r1Vault = Number(r1Node.nodeVault || 0);
+                const r3Node = (matrixDB.nodesByRank[3] || []).find((x) => !x.isClone && !x.isExtraId && (x.id === mId || x.originMainId === mId));
+                const r3Vault = Number(r3Node?.nodeVault || 0);
+                const localPool = Number((r1Vault + r3Vault).toFixed(4));
+                if (localPool >= 5.0) {
+                  autoIdPoolBig = ethers.parseUnits(localPool.toFixed(4), 18);
+                }
+              }
+            }
+
             if (r1PriceBig > 0n && autoIdPoolBig >= r1PriceBig) {
-              console.log(`⚡ [WS-Bot] (${triggerReason}) รหัสหลัก #${mId} มียอด Auto ID Pool ครบเกณฑ์ -> สั่งรัน checkAndProcessAutoNewMainIdForNode(${mId})...`);
-              const autoTx = await writeContract.checkAndProcessAutoNewMainIdForNode(mId);
-              await autoTx.wait(1);
-              recordWsBotEvent('AutoNewMainId', `Main #${mId} -> TX: ${autoTx.hash}`);
+              console.log(`⚡ [WS-Bot] (${triggerReason}) รหัสหลัก #${mId} มียอด Auto ID Pool ครบเกณฑ์ (${ethers.formatUnits(autoIdPoolBig, 18)} U) -> สั่งรัน checkAndProcessAutoNewMainIdForNode(${mId})...`);
+              try {
+                const autoTx = await writeContract.checkAndProcessAutoNewMainIdForNode(mId);
+                await autoTx.wait(1);
+                recordWsBotEvent('AutoNewMainId', `Main #${mId} -> TX: ${autoTx.hash}`);
+              } catch (txErr: any) {
+                console.log(`⚠️ [WS-Bot] checkAndProcessAutoNewMainIdForNode(${mId}) notice: ${txErr?.message || txErr}`);
+              }
             }
 
             if (minExtraPriceBig > 0n && extraIdPoolBig >= minExtraPriceBig) {
@@ -4987,6 +5080,10 @@ async function startApp() {
             createdAt: new Date().toISOString(),
           } as IndexedTreeNode;
           (fetchedNode as any).onChainVault = rawVaultVal;
+          (fetchedNode as any).onChainParentId = fetchedNode.parentId;
+          (fetchedNode as any).onChainLeftChild = fetchedNode.leftChild;
+          (fetchedNode as any).onChainRightChild = fetchedNode.rightChild;
+          (fetchedNode as any).onChainOrigMainId = fetchedNode.originMainId;
           return fetchedNode;
         }
         return null;

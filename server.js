@@ -1753,6 +1753,18 @@ function reconcileAutoExtraIdsAcrossRanks(runLocalCascades = true) {
     );
     const realIds = new Set(realNodes.map((n) => n.id));
     for (const n of realNodes) {
+      if (typeof n.onChainParentId === "number") {
+        n.parentId = n.onChainParentId;
+      }
+      if (typeof n.onChainLeftChild === "number") {
+        n.leftChild = n.onChainLeftChild;
+      }
+      if (typeof n.onChainRightChild === "number") {
+        n.rightChild = n.onChainRightChild;
+      }
+      if (typeof n.onChainOrigMainId === "number" && n.onChainOrigMainId > 0) {
+        n.originMainId = n.onChainOrigMainId;
+      }
       if (n.leftChild > 0 && !realIds.has(n.leftChild)) n.leftChild = 0;
       if (n.rightChild > 0 && !realIds.has(n.rightChild)) n.rightChild = 0;
       const baseOnChainVal = Number(
@@ -1832,6 +1844,64 @@ function reconcileAutoExtraIdsAcrossRanks(runLocalCascades = true) {
     for (const [oKey, sumVal] of ownerVaultSums.entries()) {
       if (!matrixDB.userRankVaults[oKey]) matrixDB.userRankVaults[oKey] = {};
       matrixDB.userRankVaults[oKey][r] = sumVal;
+    }
+  }
+  {
+    const r1Root = (matrixDB.nodesByRank[1] || []).find((n) => n.id === 1 && !n.isClone && !n.isExtraId);
+    if (r1Root) {
+      let totalGross1To3 = 0;
+      let totalRem1To3 = 0;
+      const grossByR = { 1: 0, 2: 0, 3: 0 };
+      const rootNodeByR = {};
+      for (let r = 1; r <= 3; r++) {
+        const rList = matrixDB.nodesByRank[r] || [];
+        const rootInR = rList.find((n) => n.id === 1 && !n.isClone && !n.isExtraId);
+        rootNodeByR[r] = rootInR;
+        if (!rootInR) continue;
+        const rUnitVault = Number(((RANK_PRICES_USDT[r - 1] || 5) * 0.35).toFixed(4));
+        let lc = 0;
+        for (const rn of rList) {
+          const isRootOrClone = rn.id === 1 || rn.isClone && (rn.originMainId === 1 || rn.id === 1);
+          if (isRootOrClone && rn.leftChild > 0) lc++;
+        }
+        const gR = Number((lc * rUnitVault).toFixed(4));
+        grossByR[r] = gR;
+        totalGross1To3 = Number((totalGross1To3 + gR).toFixed(4));
+        totalRem1To3 = Number((totalRem1To3 + Number(rootInR.nodeVault || 0)).toFixed(4));
+      }
+      const rootAutoCount = autoCountByMainId.get(1) || 0;
+      const expectedAutoDeduct = Number((rootAutoCount * 5).toFixed(4));
+      const expectedRem1To3 = Math.max(0, Number((totalGross1To3 - expectedAutoDeduct).toFixed(4)));
+      let missingRem = Number((expectedRem1To3 - totalRem1To3).toFixed(4));
+      if (missingRem > 1e-4) {
+        for (let r = 1; r <= 3 && missingRem > 1e-4; r++) {
+          const rootInR = rootNodeByR[r];
+          if (!rootInR) continue;
+          const curV = Number(rootInR.nodeVault || 0);
+          const room = Math.max(0, Number((grossByR[r] - curV).toFixed(4)));
+          if (room > 1e-4) {
+            const addV = Number(Math.min(room, missingRem).toFixed(4));
+            const nextV = Number((curV + addV).toFixed(4));
+            rootInR.nodeVault = nextV;
+            rootInR.rawNodeVault = nextV;
+            rootInR.reconciledBaseVault = nextV;
+            missingRem = Number((missingRem - addV).toFixed(4));
+            if (rootInR.owner && rootInR.owner !== ethers.ZeroAddress) {
+              const oKey = rootInR.owner.toLowerCase();
+              const rList = matrixDB.nodesByRank[r] || [];
+              let sumVal = 0;
+              for (const mNode of rList) {
+                if (mNode.isClone || mNode.isExtraId) continue;
+                if ((mNode.owner || "").toLowerCase() === oKey) {
+                  sumVal = Number((sumVal + Number(mNode.nodeVault || 0)).toFixed(4));
+                }
+              }
+              if (!matrixDB.userRankVaults[oKey]) matrixDB.userRankVaults[oKey] = {};
+              matrixDB.userRankVaults[oKey][r] = sumVal;
+            }
+          }
+        }
+      }
     }
   }
   if (runLocalCascades) {
@@ -2768,13 +2838,29 @@ async function checkAndProcessBotCloneQueue(triggerReason) {
               continue;
             }
             const pools = await readContract.getMainIdThreePools(nodeData.owner, mId);
-            const autoIdPoolBig = pools.newAutoIdPool;
+            let autoIdPoolBig = pools.newAutoIdPool;
             const extraIdPoolBig = pools.newExtraIdPool;
+            if (autoIdPoolBig < r1PriceBig) {
+              const r1Node = (matrixDB.nodesByRank[1] || []).find((x) => x.id === mId && !x.isClone && !x.isExtraId);
+              if (r1Node) {
+                const r1Vault = Number(r1Node.nodeVault || 0);
+                const r3Node = (matrixDB.nodesByRank[3] || []).find((x) => !x.isClone && !x.isExtraId && (x.id === mId || x.originMainId === mId));
+                const r3Vault = Number(r3Node?.nodeVault || 0);
+                const localPool = Number((r1Vault + r3Vault).toFixed(4));
+                if (localPool >= 5) {
+                  autoIdPoolBig = ethers.parseUnits(localPool.toFixed(4), 18);
+                }
+              }
+            }
             if (r1PriceBig > 0n && autoIdPoolBig >= r1PriceBig) {
-              console.log(`\u26A1 [WS-Bot] (${triggerReason}) \u0E23\u0E2B\u0E31\u0E2A\u0E2B\u0E25\u0E31\u0E01 #${mId} \u0E21\u0E35\u0E22\u0E2D\u0E14 Auto ID Pool \u0E04\u0E23\u0E1A\u0E40\u0E01\u0E13\u0E11\u0E4C -> \u0E2A\u0E31\u0E48\u0E07\u0E23\u0E31\u0E19 checkAndProcessAutoNewMainIdForNode(${mId})...`);
-              const autoTx = await writeContract.checkAndProcessAutoNewMainIdForNode(mId);
-              await autoTx.wait(1);
-              recordWsBotEvent("AutoNewMainId", `Main #${mId} -> TX: ${autoTx.hash}`);
+              console.log(`\u26A1 [WS-Bot] (${triggerReason}) \u0E23\u0E2B\u0E31\u0E2A\u0E2B\u0E25\u0E31\u0E01 #${mId} \u0E21\u0E35\u0E22\u0E2D\u0E14 Auto ID Pool \u0E04\u0E23\u0E1A\u0E40\u0E01\u0E13\u0E11\u0E4C (${ethers.formatUnits(autoIdPoolBig, 18)} U) -> \u0E2A\u0E31\u0E48\u0E07\u0E23\u0E31\u0E19 checkAndProcessAutoNewMainIdForNode(${mId})...`);
+              try {
+                const autoTx = await writeContract.checkAndProcessAutoNewMainIdForNode(mId);
+                await autoTx.wait(1);
+                recordWsBotEvent("AutoNewMainId", `Main #${mId} -> TX: ${autoTx.hash}`);
+              } catch (txErr) {
+                console.log(`\u26A0\uFE0F [WS-Bot] checkAndProcessAutoNewMainIdForNode(${mId}) notice: ${txErr?.message || txErr}`);
+              }
             }
             if (minExtraPriceBig > 0n && extraIdPoolBig >= minExtraPriceBig) {
               console.log(`\u26A1 [WS-Bot] (${triggerReason}) \u0E23\u0E2B\u0E31\u0E2A\u0E2B\u0E25\u0E31\u0E01 #${mId} \u0E21\u0E35\u0E22\u0E2D\u0E14 Extra ID Pool \u0E16\u0E36\u0E07\u0E40\u0E01\u0E13\u0E11\u0E4C -> \u0E2A\u0E31\u0E48\u0E07\u0E23\u0E31\u0E19 processPendingExtraIdQueue(${mId}, 2)...`);
@@ -3747,6 +3833,10 @@ async function startApp() {
             createdAt: (/* @__PURE__ */ new Date()).toISOString()
           };
           fetchedNode.onChainVault = rawVaultVal;
+          fetchedNode.onChainParentId = fetchedNode.parentId;
+          fetchedNode.onChainLeftChild = fetchedNode.leftChild;
+          fetchedNode.onChainRightChild = fetchedNode.rightChild;
+          fetchedNode.onChainOrigMainId = fetchedNode.originMainId;
           return fetchedNode;
         }
         return null;

@@ -355,16 +355,37 @@ export async function checkAndProcessPendingQueues(triggerSource: string): Promi
               continue;
             }
             const pools = await readContract.getMainIdThreePools(nodeData.owner, mId);
-            const autoIdPoolBig: bigint = pools.newAutoIdPool;
+            let autoIdPoolBig: bigint = pools.newAutoIdPool;
             const extraIdPoolBig: bigint = pools.newExtraIdPool;
+
+            // ตรวจสอบกับ Database API (/api/matrix/main-id/:mId) เพื่อให้บอทไม่ติดค้างกรณียอดคำนวณในระบบครบ 5.00 USDT แล้ว
+            if (autoIdPoolBig < r1PriceBig) {
+              try {
+                const apiRes = await fetch(`http://localhost:3000/api/matrix/main-id/${mId}`);
+                if (apiRes.ok) {
+                  const apiData = await apiRes.json();
+                  const apiPoolNum = Number(apiData?.newAutoIdPool || 0);
+                  if (apiPoolNum >= 5.0) {
+                    autoIdPoolBig = ethers.parseUnits(apiPoolNum.toFixed(4), 18);
+                  }
+                }
+              } catch {
+                // fallback to on-chain pool
+              }
+            }
 
             if (r1PriceBig > 0n && autoIdPoolBig >= r1PriceBig) {
               console.log(
-                `⚡ [WS-Bot] (${triggerSource}) รหัสหลัก #${mId} มียอด Auto ID Pool ครบเกณฑ์ -> สั่งรัน checkAndProcessAutoNewMainIdForNode(${mId})...`
+                `⚡ [WS-Bot] (${triggerSource}) รหัสหลัก #${mId} มียอด Auto ID Pool ครบเกณฑ์ (${ethers.formatUnits(autoIdPoolBig, 18)} U) -> สั่งรัน checkAndProcessAutoNewMainIdForNode(${mId})...`
               );
-              const autoTx = await writeContract.checkAndProcessAutoNewMainIdForNode(mId);
-              await autoTx.wait(1);
-              console.log(`✅ [WS-Bot] สร้าง Auto ID สำเร็จสำหรับ Main #${mId}! TX: ${autoTx.hash}`);
+              try {
+                const autoTx = await writeContract.checkAndProcessAutoNewMainIdForNode(mId);
+                await autoTx.wait(1);
+                console.log(`✅ [WS-Bot] สร้าง Auto ID สำเร็จสำหรับ Main #${mId}! TX: ${autoTx.hash}`);
+              } catch (txErr: unknown) {
+                const txMsg = txErr instanceof Error ? txErr.message : String(txErr);
+                console.log(`⚠️ [WS-Bot] checkAndProcessAutoNewMainIdForNode(${mId}) notice: ${txMsg}`);
+              }
             }
 
             if (minExtraPriceBig > 0n && extraIdPoolBig >= minExtraPriceBig) {
