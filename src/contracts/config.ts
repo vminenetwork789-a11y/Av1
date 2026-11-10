@@ -1,5 +1,5 @@
 export const DEFAULT_CONTRACT_ADDRESS =
-  import.meta.env?.VITE_CONTRACT_ADDRESS || '0xCd581c30ACeba9D6c81BaAEA5B9F88D8aAA54A42';
+  import.meta.env?.VITE_CONTRACT_ADDRESS || '0xffc4336bb0Bb6dA36254466a7d0c5E9566AC5349';
 export const DEFAULT_USDT_ADDRESS =
   import.meta.env?.VITE_USDT_ADDRESS || '0x05f24E1F598DF1aE8d0B424ce978f8ea33bB752b';
 
@@ -43,6 +43,7 @@ const LEGACY_CONTRACT_ADDRESSES = new Set([
   '0x05cf73c0b412e17fac31305936d25a7fa1622771',
   '0xed264d4cf339ddc19a0d28206a5f3aed0e1ebb3e',
   '0x9ed96af9128f0791fd883dee7ade2c728d2cec11',
+  '0xcd581c30aceba9d6c81baaea5b9f88d8aaa54a42',
 ]);
 
 const LEGACY_USDT_ADDRESSES = new Set([
