@@ -1180,6 +1180,7 @@ export function useWeb3() {
         amounts: bigint[];
         vaultTargetNodeId: bigint;
         vaultAmount: bigint;
+        hasMultipleVaultTargets?: boolean;
       } | null = null;
 
       try {
@@ -1211,7 +1212,12 @@ export function useWeb3() {
       }));
 
       let batchTx: any;
-      if (batchPayouts && batchPayouts.recipients.length > 0 && typeof matrixContract.registerBatchWithPayouts === 'function') {
+      if (
+        batchPayouts &&
+        batchPayouts.recipients.length > 0 &&
+        !batchPayouts.hasMultipleVaultTargets &&
+        typeof matrixContract.registerBatchWithPayouts === 'function'
+      ) {
         try {
           await matrixContract.registerBatchWithPayouts.staticCall(
             BigInt(sponsorNodeId),

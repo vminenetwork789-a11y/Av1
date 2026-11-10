@@ -1074,14 +1074,15 @@ export interface FrontendPayoutPayload {
   amounts: bigint[];
   vaultTargetNodeId: bigint;
   vaultAmount: bigint;
+  hasMultipleVaultTargets?: boolean;
 }
 
 /**
  * คำนวณกระเป๋าผู้รับค่าคอมมิชชันและยอดสะสม Upgrade Vault จากหน้าบ้าน (Off-Chain Payout Calculator)
  * ตามกฎเดิม 100%:
- * - 30% Direct Referral Bonus -> ผู้แนะนำตรง (directSponsor)
+ * - 30% Direct Referral Bonus -> ผู้แนะนำตรง (directSponsor) หรือเข้า Family Pool หากเป็นโคลนของรหัส #1
  * - 30% Unilevel (2% x 15 ชั้น) -> ไล่ตามสาย parentId ขึ้นไป 15 ชั้น (ชั้นที่เหลือเข้า Family Pool)
- * - 35% Upgrade Vault -> สะสมเข้าโหนดแม่ (parentId) ของโหนดที่ลงฝั่งซ้าย
+ * - 35% Upgrade Vault -> สะสมเข้าโหนดหลักต้นสังกัด (originMainId) ของโหนดแม่ที่ลงฝั่งซ้าย
  * - 4% AllSell Fee -> กระเป๋า AllSell
  * - 1% Bot Fee -> กระเป๋า Bot
  * รวมซ้ำกระเป๋าเดียวกัน (Deduplicate & Aggregate) เพื่อลดจำนวนครั้งในการโอนเหรียญประหยัด Gas สูงสุด
@@ -1115,6 +1116,7 @@ export async function calculateFrontendPayoutPayload(
     // Use fallback system wallets
   }
 
+  const lineageMap = buildCloneLineageMap(rankNodes);
   const recipientTotals = new Map<string, bigint>();
   const addTransfer = (addr: string, amount: bigint) => {
     if (amount <= 0n) return;
@@ -1125,6 +1127,7 @@ export async function calculateFrontendPayoutPayload(
 
   let vaultTargetNodeId = 1n;
   let totalVaultAmount = 0n;
+  const vaultTargetsSet = new Set<string>();
 
   const directBonusPerNode = (rankPriceWei * 30n) / 100n;
   const allSellFeePerNode = (rankPriceWei * 4n) / 100n;
@@ -1144,22 +1147,35 @@ export async function calculateFrontendPayoutPayload(
     }
 
     const effectiveNode = rankNodes[effectiveNodeIdStr];
-    const directSponsorAddr =
-      effectiveNode?.directSponsor && effectiveNode.directSponsor !== ethers.ZeroAddress
-        ? effectiveNode.directSponsor
-        : defaultSponsorAddress || familyPool;
+    const effectiveMeta = lineageMap.get(effectiveNodeIdStr);
+    const effectiveOriginMainId =
+      effectiveNode?.originMainId || effectiveMeta?.originMainId || effectiveNodeIdStr;
+    const isId1Clone = Boolean(effectiveNode?.isClone && effectiveOriginMainId === '1');
 
-    // 1. 30% Direct Referral Bonus
+    const directSponsorAddr = isId1Clone
+      ? familyPool
+      : effectiveNode?.directSponsor && effectiveNode.directSponsor !== ethers.ZeroAddress
+      ? effectiveNode.directSponsor
+      : defaultSponsorAddress || familyPool;
+
+    // 1. 30% Direct Referral Bonus (หรือเข้า Family Pool หากเป็นโคลนของรหัส #1)
     addTransfer(directSponsorAddr, directBonusPerNode);
 
     // 2. 4% AllSell & 1% Bot
     addTransfer(allSellWallet, allSellFeePerNode);
     addTransfer(botWallet, botFeePerNode);
 
-    // 3. 35% Upgrade Vault (สะสมให้โหนดแม่ของโหนดที่ลงซ้าย)
-    const pIdBn = BigInt(effectiveParentIdStr || '1');
+    // 3. 35% Upgrade Vault (สะสมให้โหนดหลักต้นสังกัด originMainId ของโหนดแม่ที่ลงซ้าย)
+    const parentNode = rankNodes[effectiveParentIdStr];
+    const parentMeta = lineageMap.get(effectiveParentIdStr);
+    const parentOriginMainIdStr =
+      parentNode?.isClone
+        ? parentNode.originMainId || parentMeta?.originMainId || effectiveParentIdStr
+        : effectiveParentIdStr || '1';
+    const pIdBn = BigInt(parentOriginMainIdStr || '1');
     if (pIdBn > 0n) {
       vaultTargetNodeId = pIdBn;
+      vaultTargetsSet.add(pIdBn.toString());
     }
     totalVaultAmount += vaultAllocPerNode;
 
@@ -1200,6 +1216,7 @@ export async function calculateFrontendPayoutPayload(
     amounts,
     vaultTargetNodeId,
     vaultAmount: totalVaultAmount,
+    hasMultipleVaultTargets: vaultTargetsSet.size > 1,
   };
 }
 
@@ -1522,30 +1539,40 @@ export async function executeOffChainSimulationAndBatch(
     );
 
     let tx;
-    try {
-      await contract.registerBatchWithPayouts.staticCall(
-        BigInt(sponsorNodeId),
-        BigInt(count),
-        simResult.targetParentIdsBigInt,
-        simResult.isLefts,
-        simResult.isClones,
-        payoutPayload.recipients,
-        payoutPayload.amounts,
-        payoutPayload.vaultTargetNodeId,
-        payoutPayload.vaultAmount
-      );
-      tx = await contract.registerBatchWithPayouts(
-        BigInt(sponsorNodeId),
-        BigInt(count),
-        simResult.targetParentIdsBigInt,
-        simResult.isLefts,
-        simResult.isClones,
-        payoutPayload.recipients,
-        payoutPayload.amounts,
-        payoutPayload.vaultTargetNodeId,
-        payoutPayload.vaultAmount
-      );
-    } catch {
+    if (!payoutPayload.hasMultipleVaultTargets) {
+      try {
+        await contract.registerBatchWithPayouts.staticCall(
+          BigInt(sponsorNodeId),
+          BigInt(count),
+          simResult.targetParentIdsBigInt,
+          simResult.isLefts,
+          simResult.isClones,
+          payoutPayload.recipients,
+          payoutPayload.amounts,
+          payoutPayload.vaultTargetNodeId,
+          payoutPayload.vaultAmount
+        );
+        tx = await contract.registerBatchWithPayouts(
+          BigInt(sponsorNodeId),
+          BigInt(count),
+          simResult.targetParentIdsBigInt,
+          simResult.isLefts,
+          simResult.isClones,
+          payoutPayload.recipients,
+          payoutPayload.amounts,
+          payoutPayload.vaultTargetNodeId,
+          payoutPayload.vaultAmount
+        );
+      } catch {
+        tx = await contract.registerBatch(
+          BigInt(sponsorNodeId),
+          BigInt(count),
+          simResult.targetParentIdsBigInt,
+          simResult.isLefts,
+          simResult.isClones
+        );
+      }
+    } else {
       tx = await contract.registerBatch(
         BigInt(sponsorNodeId),
         BigInt(count),

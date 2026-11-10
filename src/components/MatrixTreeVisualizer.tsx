@@ -6930,9 +6930,11 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
         );
 
         // ข้อมูลการนำยอดไปใช้งาน (Deductions / Outflows) ของรหัสหลักนี้
-        const upgradesUsed = Number(
-          mainReport?.vaultDeductedBreakdown?.upgradesTotalUsdt ?? 0
-        );
+        const isRootMainId1 = Number(targetMainId) === 1;
+        const upgradesUsed =
+          isRootMainId1 || currentMaxR <= 1
+            ? 0
+            : Number(mainReport?.vaultDeductedBreakdown?.upgradesTotalUsdt ?? 0);
         const autoIdsCount = Math.max(
           modalNode.totalAutoIdCount || 0,
           autoIdsList.length,
@@ -7058,10 +7060,12 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
           Number((effectiveAutoIdPool + autoIdsUsed).toFixed(2)),
           Number(calculatedAutoGross.toFixed(2))
         );
-        const autoPoolUpgradesUsed = Math.max(
-          0,
-          Number((grossAutoIdPool - effectiveAutoIdPool - autoIdsUsed).toFixed(2))
-        );
+        const autoPoolUpgradesUsed = isRootMainId1
+          ? 0
+          : Math.max(
+              0,
+              Number((grossAutoIdPool - effectiveAutoIdPool - autoIdsUsed).toFixed(2))
+            );
 
         // สูตรคำนวณ Extra ID Pool:
         // 1. รายได้เกิดจากไอดี Extra ID (โบนัส 35% เม็ดซ้ายของ Extra ID ที่เกิดขึ้น)

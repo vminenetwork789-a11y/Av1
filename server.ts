@@ -200,20 +200,6 @@ const PORT = Number(process.env.PORT) || 3000;
 // Persistent Database / Store File for Contract Address & Settings
 const CONFIG_FILE_PATH = path.resolve(__dirname, 'prisma/contract-config.json');
 
-const DEFAULT_SYSTEM_CONFIG = {
-  contractAddress:
-    process.env.OVERRIDE_CONTRACT_ADDRESS ||
-    process.env.CONTRACT_ADDRESS ||
-    '0xffc4336bb0Bb6dA36254466a7d0c5E9566AC5349',
-  buildDefaultContract: '0xffc4336bb0Bb6dA36254466a7d0c5E9566AC5349',
-  usdtAddress: process.env.USDT_ADDRESS || '0x05f24E1F598DF1aE8d0B424ce978f8ea33bB752b',
-  chainId: Number(process.env.CHAIN_ID || 97),
-  networkName: process.env.NETWORK_NAME || 'BNB Smart Chain Testnet',
-  rpcUrl: process.env.RPC_URL || 'https://bsc-testnet-rpc.publicnode.com',
-  blockExplorerUrl: process.env.BLOCK_EXPLORER_URL || 'https://testnet.bscscan.com',
-  updatedAt: new Date().toISOString(),
-};
-
 const SERVER_LEGACY_CONTRACTS = new Set([
   '0x104d65034b00f0db59497036208f3b798b4c10cc',
   '0x0742e9581217cc8cd6de2aa80b7ce9ad881deee3',
@@ -224,6 +210,7 @@ const SERVER_LEGACY_CONTRACTS = new Set([
   '0xc71a9a677d9ef61a9133d6e6545306a11bd3ee5a',
   '0x87e9f1b9a63eb65c91fca718c5af1cee4eec6209',
   '0x675cdb85d9a843ac3e87b42beb7A606da79882e8',
+  '0x675cdb85d9a843ac3e87b42beb7a606da79882e8',
   '0xae3736ecd23dfb6c49b76ef8548391c1b6fff7b9',
   '0x1700326ce4d4507a5dd88eb50156758581b6f4cb',
   '0x5f0a48aa94dcfa820a12cb8e6c46e9cce807d341',
@@ -255,11 +242,33 @@ const SERVER_LEGACY_CONTRACTS = new Set([
   '0xed264d4cf339ddc19a0d28206a5f3aed0e1ebb3e',
   '0x9ed96af9128f0791fd883dee7ade2c728d2cec11',
   '0xcd581c30aceba9d6c81baaea5b9f88d8aaa54a42',
+  '0xffc4336bb0bb6da36254466a7d0c5e9566ac5349',
 ]);
 
 const SERVER_LEGACY_USDT = new Set([
   '0x95856be9c16afc9c147c034cd6a514d730bd90ba',
 ]);
+
+const rawEnvContract = (
+  process.env.OVERRIDE_CONTRACT_ADDRESS ||
+  process.env.CONTRACT_ADDRESS ||
+  ''
+).trim();
+const resolvedDefaultContract =
+  rawEnvContract && !SERVER_LEGACY_CONTRACTS.has(rawEnvContract.toLowerCase())
+    ? rawEnvContract
+    : '0x98c2B26E052C63E3F520c75428cEA3CB5E0649e0';
+
+const DEFAULT_SYSTEM_CONFIG = {
+  contractAddress: resolvedDefaultContract,
+  buildDefaultContract: '0x98c2B26E052C63E3F520c75428cEA3CB5E0649e0',
+  usdtAddress: process.env.USDT_ADDRESS || '0x05f24E1F598DF1aE8d0B424ce978f8ea33bB752b',
+  chainId: Number(process.env.CHAIN_ID || 97),
+  networkName: process.env.NETWORK_NAME || 'BNB Smart Chain Testnet',
+  rpcUrl: process.env.RPC_URL || 'https://bsc-testnet-rpc.publicnode.com',
+  blockExplorerUrl: process.env.BLOCK_EXPLORER_URL || 'https://testnet.bscscan.com',
+  updatedAt: new Date().toISOString(),
+};
 
 // ==========================================
 // POSTGRESQL POOL & INTEGRATION
@@ -801,7 +810,15 @@ function loadMatrixDBFromDisk(): PersistentMatrixDatabase {
   } catch (err) {
     console.warn('[MatrixDB] Notice reading prisma/matrix-db.json:', err);
   }
-  return createEmptyMatrixDB(CONTRACT_ADDRESS, USDT_ADDRESS);
+  const fresh = createEmptyMatrixDB(CONTRACT_ADDRESS, USDT_ADDRESS);
+  try {
+    const dir = path.dirname(MATRIX_DB_FILE_PATH);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(MATRIX_DB_FILE_PATH, JSON.stringify(fresh, null, 2), 'utf8');
+  } catch {
+    // Non-blocking
+  }
+  return fresh;
 }
 
 let matrixDB: PersistentMatrixDatabase = loadMatrixDBFromDisk();
@@ -1331,8 +1348,27 @@ function rebuildDatabaseUpgradeLogsFromNodes() {
 
       // Find previous rank node for this Main ID to calculate Vault Deducted vs Wallet Paid
       const mainsInPrev = ownerMainsInPrev.get(oKey) || [];
-      const prevNode = mainsInPrev.find((m) => m.id === resolvedMainIdRank1) || mainsInPrev[0];
-      const rawPrevVault = Number(prevNode?.rawNodeVault || 0);
+      const prevNode =
+        mainsInPrev.find((m) => m.id === resolvedMainIdRank1 || m.originMainId === resolvedMainIdRank1) ||
+        mainsInPrev[0];
+      const prevUnitVault = Number(((RANK_PRICES_USDT[rankNum - 2] || 5) * 0.35).toFixed(4));
+      let prevLeftCount = 0;
+      if (prevNode) {
+        for (const pn of prevRankNodes) {
+          const isSameMain =
+            pn.id === prevNode.id ||
+            (pn.isClone &&
+              (pn.originMainId === prevNode.id ||
+                (resolvedMainIdRank1 > 0 && pn.originMainId === resolvedMainIdRank1)));
+          if (isSameMain && pn.leftChild > 0) {
+            prevLeftCount++;
+          }
+        }
+      }
+      const rawPrevVault = Math.max(
+        Number(prevNode?.rawNodeVault || 0),
+        Number((prevLeftCount * prevUnitVault).toFixed(2))
+      );
       const remPrevVault = Number(prevNode?.nodeVault || 0);
       const rawDiff = Math.max(0, Number((rawPrevVault - remPrevVault).toFixed(2)));
 
@@ -2369,7 +2405,91 @@ function reconcileAutoExtraIdsAcrossRanks(): Array<{
   }
 
   // Reconcile real on-chain Rank 1 Auto Main IDs
-  reconcileRank1AutoMainIds();
+  const autoMainSourceMap = reconcileRank1AutoMainIds();
+  const autoCountByMainId = new Map<number, number>();
+  for (const srcMain of autoMainSourceMap.values()) {
+    autoCountByMainId.set(srcMain, (autoCountByMainId.get(srcMain) || 0) + 1);
+  }
+
+  const maxRankByMainId = new Map<number, number>();
+  maxRankByMainId.set(1, 27);
+  const extraCountByMainId = new Map<number, number>();
+  const r1Nodes = matrixDB.nodesByRank[1] || [];
+
+  for (let r = 1; r <= 27; r++) {
+    const rList = matrixDB.nodesByRank[r] || [];
+    for (const n of rList) {
+      if (!n.isClone && !n.isExtraId) {
+        const mId = r === 1 ? n.id : (n.originMainId || n.id);
+        if (mId > 1) {
+          maxRankByMainId.set(mId, Math.max(maxRankByMainId.get(mId) || 1, r));
+        }
+      } else if (n.isExtraId && !n.isClone) {
+        const extraOwner = (n.owner || '').toLowerCase();
+        const ownerMains = r1Nodes.filter(
+          (m) => !m.isClone && !m.isExtraId && (m.owner || '').toLowerCase() === extraOwner
+        );
+        const spMain = ownerMains.length > 0 ? ownerMains[0].id : (n.directSponsorNodeId || 1);
+        extraCountByMainId.set(spMain, (extraCountByMainId.get(spMain) || 0) + 1);
+      }
+    }
+  }
+
+  for (let r = 1; r <= 27; r++) {
+    const rList = matrixDB.nodesByRank[r] || [];
+    if (rList.length === 0) continue;
+    const rUnitVault = Number(((RANK_PRICES_USDT[r - 1] || 5) * 0.35).toFixed(4));
+    const ownerVaultSums = new Map<string, number>();
+
+    for (const mNode of rList) {
+      if (mNode.isClone || mNode.isExtraId) continue;
+      const r1MainId = r === 1 ? mNode.id : (mNode.originMainId || mNode.id);
+
+      let leftCount = 0;
+      for (const rn of rList) {
+        const isSameMain =
+          rn.id === mNode.id ||
+          (rn.isClone &&
+            (rn.originMainId === mNode.id ||
+              (r1MainId > 0 && rn.originMainId === r1MainId)));
+        if (isSameMain && rn.leftChild > 0) {
+          leftCount++;
+        }
+      }
+
+      const expectedGrossVault = Number((leftCount * rUnitVault).toFixed(4));
+      const maxR = maxRankByMainId.get(r1MainId) || 1;
+      const hasUpgradedBeyondR = r1MainId > 1 && maxR > r;
+      const hasSpawnedAutoIds = r <= 3 && (autoCountByMainId.get(r1MainId) || 0) > 0;
+      const hasSpawnedExtraIds = r >= 4 && (extraCountByMainId.get(r1MainId) || 0) > 0;
+      const canHaveDeduction = hasUpgradedBeyondR || hasSpawnedAutoIds || hasSpawnedExtraIds;
+
+      const currentVal = Number(mNode.nodeVault ?? mNode.rawNodeVault ?? 0);
+      let reconciledVal = Math.min(currentVal, expectedGrossVault);
+      if (!canHaveDeduction) {
+        reconciledVal = expectedGrossVault;
+      }
+
+      mNode.nodeVault = reconciledVal;
+      mNode.reconciledBaseVault = reconciledVal;
+      if (
+        (mNode.rawNodeVault ?? 0) > expectedGrossVault ||
+        (!canHaveDeduction && (mNode.rawNodeVault ?? 0) < expectedGrossVault)
+      ) {
+        mNode.rawNodeVault = reconciledVal;
+      }
+
+      if (mNode.owner && mNode.owner !== ethers.ZeroAddress) {
+        const oKey = mNode.owner.toLowerCase();
+        ownerVaultSums.set(oKey, Number(((ownerVaultSums.get(oKey) || 0) + reconciledVal).toFixed(4)));
+      }
+    }
+
+    for (const [oKey, sumVal] of ownerVaultSums.entries()) {
+      if (!matrixDB.userRankVaults[oKey]) matrixDB.userRankVaults[oKey] = {};
+      matrixDB.userRankVaults[oKey][r] = sumVal;
+    }
+  }
 
   return createdExtraNodes;
 }
@@ -6483,9 +6603,12 @@ async function startApp() {
           ).toFixed(2)
         );
         const autoDeduct = Number((rep.autoIdsSpawned.length * 5.0).toFixed(2));
-        const upDeduct = Number(
-          Math.max(0, rep.vault35DeductedTotalUsdt - extraDeduct - autoDeduct).toFixed(2)
-        );
+        const upDeduct =
+          rep.id === 1 || (rep.currentMaxRank || 1) <= 1
+            ? 0
+            : Number(
+                Math.max(0, rep.vault35DeductedTotalUsdt - extraDeduct - autoDeduct).toFixed(2)
+              );
 
         rep.vaultDeductedBreakdown = {
           extraIdsTotalUsdt: extraDeduct,

@@ -1,8 +1,3 @@
-export const DEFAULT_CONTRACT_ADDRESS =
-  import.meta.env?.VITE_CONTRACT_ADDRESS || '0xffc4336bb0Bb6dA36254466a7d0c5E9566AC5349';
-export const DEFAULT_USDT_ADDRESS =
-  import.meta.env?.VITE_USDT_ADDRESS || '0x05f24E1F598DF1aE8d0B424ce978f8ea33bB752b';
-
 const LEGACY_CONTRACT_ADDRESSES = new Set([
   '0x104d65034b00f0db59497036208f3b798b4c10cc',
   '0x0742e9581217cc8cd6de2aa80b7ce9ad881deee3',
@@ -44,11 +39,20 @@ const LEGACY_CONTRACT_ADDRESSES = new Set([
   '0xed264d4cf339ddc19a0d28206a5f3aed0e1ebb3e',
   '0x9ed96af9128f0791fd883dee7ade2c728d2cec11',
   '0xcd581c30aceba9d6c81baaea5b9f88d8aaa54a42',
+  '0xffc4336bb0bb6da36254466a7d0c5e9566ac5349',
 ]);
 
 const LEGACY_USDT_ADDRESSES = new Set([
   '0x95856be9c16afc9c147c034cd6a514d730bd90ba',
 ]);
+
+const envContractAddr = import.meta.env?.VITE_CONTRACT_ADDRESS?.trim();
+export const DEFAULT_CONTRACT_ADDRESS =
+  envContractAddr && !LEGACY_CONTRACT_ADDRESSES.has(envContractAddr.toLowerCase())
+    ? envContractAddr
+    : '0x98c2B26E052C63E3F520c75428cEA3CB5E0649e0';
+export const DEFAULT_USDT_ADDRESS =
+  import.meta.env?.VITE_USDT_ADDRESS || '0x05f24E1F598DF1aE8d0B424ce978f8ea33bB752b';
 
 export const ADMIN_WALLET_ADDRESSES = new Set([
   '0x622e20082e63c7220c5af0a77cbc437a98505311', // Root User / Main ID #1
