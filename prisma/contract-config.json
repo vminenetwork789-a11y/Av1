@@ -1,6 +1,6 @@
 {
-  "contractAddress": "0x51e6fB0c0197f8A26C83d02B47363E90e092EaF4",
-  "buildDefaultContract": "0x51e6fB0c0197f8A26C83d02B47363E90e092EaF4",
+  "contractAddress": "0xb3084A1D0642f6c269119df5408fb08521e2d70D",
+  "buildDefaultContract": "0xb3084A1D0642f6c269119df5408fb08521e2d70D",
   "usdtAddress": "0x05f24E1F598DF1aE8d0B424ce978f8ea33bB752b",
   "chainId": 97,
   "networkName": "BNB Smart Chain Testnet",

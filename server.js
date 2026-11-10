@@ -189,16 +189,17 @@ var SERVER_LEGACY_CONTRACTS = /* @__PURE__ */ new Set([
   "0xcd581c30aceba9d6c81baaea5b9f88d8aaa54a42",
   "0xffc4336bb0bb6da36254466a7d0c5e9566ac5349",
   "0x98c2b26e052c63e3f520c75428cea3cb5e0649e0",
-  "0x742d5249758f73683e95e5404d801f2ac6755781"
+  "0x742d5249758f73683e95e5404d801f2ac6755781",
+  "0x51e6fb0c0197f8a26c83d02b47363e90e092eaf4"
 ]);
 var SERVER_LEGACY_USDT = /* @__PURE__ */ new Set([
   "0x95856be9c16afc9c147c034cd6a514d730bd90ba"
 ]);
 var rawEnvContract = (process.env.OVERRIDE_CONTRACT_ADDRESS || process.env.CONTRACT_ADDRESS || "").trim();
-var resolvedDefaultContract = rawEnvContract && !SERVER_LEGACY_CONTRACTS.has(rawEnvContract.toLowerCase()) ? rawEnvContract : "0x51e6fB0c0197f8A26C83d02B47363E90e092EaF4";
+var resolvedDefaultContract = rawEnvContract && !SERVER_LEGACY_CONTRACTS.has(rawEnvContract.toLowerCase()) ? rawEnvContract : "0xb3084A1D0642f6c269119df5408fb08521e2d70D";
 var DEFAULT_SYSTEM_CONFIG = {
   contractAddress: resolvedDefaultContract,
-  buildDefaultContract: "0x51e6fB0c0197f8A26C83d02B47363E90e092EaF4",
+  buildDefaultContract: "0xb3084A1D0642f6c269119df5408fb08521e2d70D",
   usdtAddress: process.env.USDT_ADDRESS || "0x05f24E1F598DF1aE8d0B424ce978f8ea33bB752b",
   chainId: Number(process.env.CHAIN_ID || 97),
   networkName: process.env.NETWORK_NAME || "BNB Smart Chain Testnet",
@@ -1233,144 +1234,45 @@ function reconcileRankTreeLinks(nodes) {
         }
       }
     }
-    const needsReplay = nodes.length > 1;
-    const leftCountBeforeByMain = /* @__PURE__ */ new Map();
-    for (const m of nodes) {
-      if (m.isClone || m.isExtraId) continue;
-      let lc = 0;
-      const mOrig = m.originMainId || m.id;
-      for (const cand of nodes) {
-        const cOrig = cand.originMainId || cand.id;
-        if ((cand.id === m.id || cand.isClone && (cOrig === m.id || cOrig === mOrig)) && cand.leftChild > 0 && byId.has(cand.leftChild)) {
-          lc++;
+    for (const n of nodes) {
+      if (n.leftChild > 0) {
+        const left = byId.get(n.leftChild);
+        if (left && left.parentId <= 0) {
+          left.parentId = n.id;
         }
       }
-      leftCountBeforeByMain.set(m.id, lc);
+      if (n.rightChild > 0) {
+        const right = byId.get(n.rightChild);
+        if (right && right.parentId <= 0) {
+          right.parentId = n.id;
+        }
+      }
     }
-    if (needsReplay) {
-      const rootNode = nodes.find((n) => n.id === 1) || nodes[0];
-      const nonCloneList = nodes.filter((n) => n.id !== rootNode.id && !n.isClone).sort((a, b) => a.id - b.id);
-      const cloneIds = nodes.filter((n) => n.id !== rootNode.id && n.isClone).map((n) => n.id).sort((a, b) => a - b);
-      const cloneTemplates = /* @__PURE__ */ new Map();
-      for (const n of nodes) {
-        if (n.isClone) cloneTemplates.set(n.id, n);
+    for (const n of nodes) {
+      if (n.id <= 1 || n.parentId <= 0) continue;
+      const parent = byId.get(n.parentId);
+      if (!parent) continue;
+      if (parent.leftChild === n.id || parent.rightChild === n.id) continue;
+      if (!parent.leftChild || parent.leftChild <= 0 || !byId.has(parent.leftChild)) {
+        parent.leftChild = n.id;
+      } else if (!parent.rightChild || parent.rightChild <= 0 || !byId.has(parent.rightChild)) {
+        parent.rightChild = n.id;
       }
-      rootNode.parentId = 0;
-      rootNode.leftChild = 0;
-      rootNode.rightChild = 0;
-      const placedNodes = [rootNode];
-      let cloneCursor = 0;
-      const spawnTriggeredClones = (initialParent) => {
-        const rightQueue = [initialParent];
-        let guard = 0;
-        while (rightQueue.length > 0 && guard < 100) {
-          guard++;
-          const trigParent = rightQueue.shift();
-          const trigOriginNode = !trigParent.isClone ? trigParent : placedNodes.find(
-            (p) => !p.isClone && (p.id === trigParent.originMainId || p.originMainId === trigParent.originMainId)
-          ) || trigParent;
-          const cloneOrigMainId = trigOriginNode.isExtraId ? trigOriginNode.id : trigOriginNode.originMainId || trigOriginNode.id;
-          const existingClonesForOrig = placedNodes.filter(
-            (p) => p.isClone && (p.originMainId || p.id) === cloneOrigMainId
-          ).length;
-          const roundIdx = existingClonesForOrig % 2;
-          const cRound = roundIdx + 1;
-          let savedSponsorId = trigOriginNode.directSponsorNodeId || 1;
-          let sponsorNodeInRankId = 0;
-          if (cloneOrigMainId === 1 || trigOriginNode.id === 1) {
-            savedSponsorId = 1;
-            sponsorNodeInRankId = 1;
-          } else {
-            const spNodeInR = placedNodes.find(
-              (p) => !p.isClone && !p.isExtraId && (savedSponsorId === 1 ? p.id === 1 : rankNum === 1 ? p.id === savedSponsorId : p.originMainId === savedSponsorId)
-            );
-            sponsorNodeInRankId = spNodeInR ? spNodeInR.id : 0;
-          }
-          const cSlot = roundIdx === 0 && sponsorNodeInRankId > 0 ? findExtraIdPlacementInRankNodes(placedNodes, sponsorNodeInRankId) : findShallowestLeftToRightSlotInRankNodes(placedNodes, 1);
-          const assignedCloneId = cloneCursor < cloneIds.length ? cloneIds[cloneCursor++] : Math.max(
-            ...placedNodes.map((x) => x.id),
-            ...nonCloneList.map((x) => x.id),
-            0
-          ) + 1;
-          const template = cloneTemplates.get(assignedCloneId);
-          const cloneNode = {
-            ...template || {},
-            id: assignedCloneId,
-            rank: rankNum,
-            owner: trigOriginNode.owner,
-            directSponsor: trigOriginNode.directSponsor || rootNode.owner,
-            parentId: cSlot.parentId,
-            leftChild: 0,
-            rightChild: 0,
-            isClone: true,
-            isExtraId: false,
-            originMainId: cloneOrigMainId,
-            cloneSequence: existingClonesForOrig + 1,
-            cloneRound: cRound,
-            directSponsorNodeId: savedSponsorId,
-            nodeVault: 0,
-            rawNodeVault: 0,
-            reconciledBaseVault: 0,
-            originType: "CLONE"
-          };
-          const cParent = placedNodes.find((p) => p.id === cSlot.parentId);
-          placedNodes.push(cloneNode);
-          if (cParent) {
-            if (cSlot.isLeft) {
-              cParent.leftChild = cloneNode.id;
-            } else {
-              cParent.rightChild = cloneNode.id;
-              rightQueue.push(cParent);
-            }
-          }
-        }
-      };
-      for (const n of nonCloneList) {
-        n.leftChild = 0;
-        n.rightChild = 0;
+    }
+    for (const n of nodes) {
+      if (n.id > 1 && n.parentId <= 0) {
         const spMainId = n.directSponsorNodeId > 0 ? n.directSponsorNodeId : 1;
-        const spNodeInRank = placedNodes.find(
+        const spNodeInRank = nodes.find(
           (p) => !p.isClone && !p.isExtraId && (spMainId === 1 ? p.id === 1 : rankNum === 1 ? p.id === spMainId : p.originMainId === spMainId)
         );
-        const slot = spNodeInRank ? findExtraIdPlacementInRankNodes(placedNodes, spNodeInRank.id) : findShallowestLeftToRightSlotInRankNodes(placedNodes, 1);
-        const targetParent = placedNodes.find((p) => p.id === slot.parentId) || rootNode;
+        const slot = spNodeInRank ? findExtraIdPlacementInRankNodes(nodes, spNodeInRank.id) : findShallowestLeftToRightSlotInRankNodes(nodes, 1);
+        const targetParent = byId.get(slot.parentId) || nodes[0];
         n.parentId = targetParent.id;
-        placedNodes.push(n);
         if (slot.isLeft) {
           targetParent.leftChild = n.id;
         } else {
           targetParent.rightChild = n.id;
-          spawnTriggeredClones(targetParent);
         }
-      }
-      placedNodes.sort((a, b) => a.id - b.id);
-      nodes.length = 0;
-      byId.clear();
-      for (const pn of placedNodes) {
-        nodes.push(pn);
-        byId.set(pn.id, pn);
-      }
-    }
-    const rUnitVault = Number(((RANK_PRICES_USDT[rankNum - 1] || 5) * 0.35).toFixed(4));
-    for (const m of nodes) {
-      if (m.isClone || m.isExtraId) continue;
-      const rawVal = Number(m.rawNodeVault ?? m.nodeVault ?? 0);
-      const lcBefore = leftCountBeforeByMain.get(m.id) ?? 0;
-      let lcAfter = 0;
-      const mOrig = m.originMainId || m.id;
-      for (const cand of nodes) {
-        const cOrig = cand.originMainId || cand.id;
-        if ((cand.id === m.id || cand.isClone && (cOrig === m.id || cOrig === mOrig)) && cand.leftChild > 0 && byId.has(cand.leftChild)) {
-          lcAfter++;
-        }
-      }
-      const deltaLc = lcAfter - lcBefore;
-      const baseVal = Number(m.reconciledBaseVault ?? m.nodeVault ?? rawVal);
-      const adjustedVault = deltaLc !== 0 && !nodes.some((n) => n.isLocalUpgrade) ? Math.max(0, Number((rawVal + deltaLc * rUnitVault).toFixed(4))) : baseVal;
-      m.nodeVault = adjustedVault;
-      m.reconciledBaseVault = adjustedVault;
-      if (deltaLc !== 0 && !nodes.some((n) => n.isLocalUpgrade)) {
-        m.rawNodeVault = adjustedVault;
       }
     }
   }
