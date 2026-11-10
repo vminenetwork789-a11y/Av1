@@ -781,6 +781,34 @@ contract FractalFlowMatrix27 is Ownable, ReentrancyGuard {
         bool _isExtraId,
         bool _payOnChainRewards
     ) internal returns (uint256 newNodeId) {
+        return _insertNodeWithOrigin(
+            _rank,
+            _owner,
+            _sponsor,
+            _sponsorNodeId,
+            _targetParentId,
+            _isLeft,
+            _isClone,
+            _isExtraId,
+            0,
+            0,
+            _payOnChainRewards
+        );
+    }
+
+    function _insertNodeWithOrigin(
+        uint8 _rank,
+        address _owner,
+        address _sponsor,
+        uint256 _sponsorNodeId,
+        uint256 _targetParentId,
+        bool _isLeft,
+        bool _isClone,
+        bool _isExtraId,
+        uint256 _cloneOriginId,
+        uint8 _cloneRoundVal,
+        bool _payOnChainRewards
+    ) internal returns (uint256 newNodeId) {
         uint256 pId = _targetParentId;
         bool isL = _isLeft;
         if (
@@ -820,6 +848,13 @@ contract FractalFlowMatrix27 is Ownable, ReentrancyGuard {
                 mainIdNodeInRank[newNodeId][1] = newNodeId;
                 nodeToR1MainId[1][newNodeId] = newNodeId;
             }
+        } else {
+            uint256 resolvedOrigin = _cloneOriginId != 0 ? _cloneOriginId : newNodeId;
+            nodeOriginMainId[_rank][newNodeId] = resolvedOrigin;
+            nodeDirectSponsorNodeId[_rank][newNodeId] = _sponsorNodeId > 0 ? _sponsorNodeId : 1;
+            mainNodeLatestCloneId[_rank][resolvedOrigin] = newNodeId;
+            nodeCloneRound[_rank][newNodeId] = _cloneRoundVal > 0 ? _cloneRoundVal : 1;
+            nodeCloneTotalCount[_rank][resolvedOrigin] += 1;
         }
 
         emit NodeCreated(_rank, newNodeId, _owner, _sponsor, pId, isL, _isClone, _isExtraId);
@@ -843,16 +878,29 @@ contract FractalFlowMatrix27 is Ownable, ReentrancyGuard {
         uint8 currentRound = uint8(nodeCloneTotalCount[_rank][originId] % 2);
         sponsorRoundToggle[_rank][originId] = currentRound == 0 ? 1 : 0;
 
-        (uint256 pId, bool isL) = currentRound == 0
-            ? _findPlacementSpot(_rank, _sponsor, _targetSponsorNodeId)
+        uint256 sponsorInRankId = _targetSponsorNodeId;
+        if (_rank > 1 && sponsorInRankId > 1) {
+            uint256 mappedInR = getMainIdNodeInRank(sponsorInRankId, _rank);
+            sponsorInRankId = mappedInR;
+        }
+
+        (uint256 pId, bool isL) = (currentRound == 0 && sponsorInRankId > 0)
+            ? _findPlacementSpot(_rank, _sponsor, sponsorInRankId)
             : _findFirstAvailableUnder(_rank, 1);
 
-        newNodeId = _insertNode(_rank, _owner, _sponsor, _targetSponsorNodeId, pId, isL, true, false, _payRewards);
-        nodeOriginMainId[_rank][newNodeId] = originId;
-        nodeDirectSponsorNodeId[_rank][newNodeId] = _targetSponsorNodeId > 0 ? _targetSponsorNodeId : 1;
-        mainNodeLatestCloneId[_rank][originId] = newNodeId;
-        nodeCloneRound[_rank][newNodeId] = currentRound == 0 ? 1 : 2;
-        nodeCloneTotalCount[_rank][originId] += 1;
+        newNodeId = _insertNodeWithOrigin(
+            _rank,
+            _owner,
+            _sponsor,
+            _targetSponsorNodeId,
+            pId,
+            isL,
+            true,
+            false,
+            originId,
+            currentRound == 0 ? 1 : 2,
+            _payRewards
+        );
     }
 
     function _triggerRightChildClone(uint8 _rank, uint256 _parentId, bool _payRewards) internal {
@@ -886,10 +934,26 @@ contract FractalFlowMatrix27 is Ownable, ReentrancyGuard {
             return _findFirstAvailableUnder(_rank, 1);
         }
 
+        // Priority 1: ติดตัวผู้แนะนำตรง (Direct Sponsor) ซ้ายก่อน ขวาตาม
         MatrixNode storage primaryNode = rankNodes[_rank][primaryId];
         if (primaryNode.leftChild == 0) return (primaryId, true);
         if (primaryNode.rightChild == 0) return (primaryId, false);
 
+        // Priority 2: หากผู้แนะนำตรงเต็ม ให้วิ่งไปต่อไอดีโคลนนิ่งของผู้แนะนำตรง (ซ้ายก่อน ขวาตาม เรียงตามลำดับโหนด)
+        uint256 originTag = nodeOriginMainId[_rank][primaryId];
+        if (originTag == 0) originTag = primaryId;
+        uint256 total = totalNodesInRank[_rank];
+        for (uint256 cid = primaryId + 1; cid <= total; cid++) {
+            MatrixNode storage cand = rankNodes[_rank][cid];
+            if (!cand.isClone) continue;
+            uint256 candOrig = nodeOriginMainId[_rank][cid];
+            if (candOrig == primaryId || candOrig == originTag) {
+                if (cand.leftChild == 0) return (cid, true);
+                if (cand.rightChild == 0) return (cid, false);
+            }
+        }
+
+        // Priority 3: Fallback BFS ภายใต้สายงานผู้แนะนำตรง
         return _findFirstAvailableUnder(_rank, primaryId);
     }
 

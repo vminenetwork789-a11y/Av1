@@ -1613,9 +1613,8 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
           }
         }
 
-        // 2. Check if any node in Rank 1..27 is actually orphaned (missing parent link on-chain)
-        // Authentic on-chain parentId / leftChild / rightChild placements are always preserved.
-        let needsReplay = false;
+        // 2. Always verify and reconcile canonical Sponsor -> Clone-of-Sponsor placement
+        const needsReplay = sIds.length > 1;
         const cloneSeqByOrig = new Map<number, number>();
         for (const nid of sIds) {
           const node = sMap.get(nid)!;
@@ -1623,12 +1622,6 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
             const origKey = node.originMainId || node.id;
             const nextSeq = (cloneSeqByOrig.get(origKey) || 0) + 1;
             cloneSeqByOrig.set(origKey, nextSeq);
-          }
-          if (nid <= 1) continue;
-          const p = sMap.get(node.parentId);
-          if (!p || (p.leftChild !== node.id && p.rightChild !== node.id)) {
-            needsReplay = true;
-            break;
           }
         }
 
@@ -1650,7 +1643,7 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
           leftCountBeforeByMain.set(m.id, lc);
         }
 
-        // 3. Chronological replay of Rank 1..27 placements and right-child Rebirth Clone triggers (only if orphaned)
+        // 3. Chronological replay of Rank 1..27 placements and right-child Rebirth Clone triggers
         if (needsReplay) {
           const allSnaps = Array.from(sMap.values()).sort((a, b) => a.id - b.id);
           const rootSnap = sMap.get(1) || allSnaps[0];
@@ -1836,6 +1829,32 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
           const finalSnaps = Array.from(placedMap.values()).sort((a, b) => a.id - b.id);
           for (const fs of finalSnaps) {
             sMap.set(fs.id, fs);
+          }
+
+          // Reconcile per-node nodeVault if replay changed left-child count
+          const rUnitVault = Number(((RANK_PRICES_USDT[rNum - 1] || 5) * 0.35).toFixed(4));
+          for (const fs of finalSnaps) {
+            if (fs.isClone || fs.isExtraId) continue;
+            const lcBefore = leftCountBeforeByMain.get(fs.id) ?? 0;
+            let lcAfter = 0;
+            const mOrig = fs.originMainId || fs.id;
+            for (const cand of finalSnaps) {
+              const cOrig = cand.originMainId || cand.id;
+              if (
+                (cand.id === fs.id || (cand.isClone && (cOrig === fs.id || cOrig === mOrig))) &&
+                cand.leftChild > 0 &&
+                sMap.has(cand.leftChild)
+              ) {
+                lcAfter++;
+              }
+            }
+            const deltaLc = lcAfter - lcBefore;
+            if (deltaLc !== 0) {
+              fs.nodeVault = Math.max(0, Number(((fs.nodeVault || 0) + deltaLc * rUnitVault).toFixed(4)));
+              if (rNum === activeRank) {
+                onChainNodeVaultMap.set(fs.id, fs.nodeVault);
+              }
+            }
           }
 
           if (rNum === activeRank) {

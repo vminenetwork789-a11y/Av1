@@ -584,7 +584,8 @@ function simulateRightChildCloneCascade(
   }
 
   // แยกรหัสหลักของโคลน (cloneOriginMainIdStr เช่น #5) ออกจากรหัสผู้แนะนำของรหัสหลักนั้น (targetSponsorNodeId เช่น #2)
-  // เพื่อให้โคลนนิ่งของ #5 วิ่งไปต่อ #2 หรือโคลนนิ่งของ #2 (#6) ตามผู้แนะนำที่แท้จริง!
+  // รอบที่ 1 (roundIndex === 0): วิ่งไปต่อผู้แนะนำตรง หรือโคลนนิ่งของผู้แนะนำตรง
+  // รอบที่ 2 (roundIndex === 1): วางเรียงจากบนลงล่าง ซ้ายไปขวา (BFS จาก Root #1)
   const targetSponsorNodeId = resolveSponsorNodeIdForMainNode(
     rankNodes,
     lineageMap,
@@ -592,11 +593,17 @@ function simulateRightChildCloneCascade(
     parentSponsor
   );
 
-  const clonePlacement = findClonePlacementSlot(
-    rankNodes,
-    parentSponsor,
-    targetSponsorNodeId
-  );
+  const existingClonesForOrigin = Object.values(rankNodes).filter((n) => {
+    if (!n.isClone) return false;
+    const nOrig = lineageMap.get(n.id.toString())?.originMainId || n.originMainId || n.id.toString();
+    return nOrig === cloneOriginMainIdStr;
+  }).length;
+  const roundIndex = existingClonesForOrigin % 2;
+
+  const clonePlacement =
+    roundIndex === 0
+      ? findClonePlacementSlot(rankNodes, parentSponsor, targetSponsorNodeId)
+      : findFirstAvailableUnder(rankNodes, 1n);
 
   state.nextNodeId += 1n;
   const cloneNodeId = state.nextNodeId;
@@ -703,6 +710,8 @@ export async function loadOnChainRank1State(
             leftChild: BigInt(n.leftChild || 0),
             rightChild: BigInt(n.rightChild || 0),
             isClone: Boolean(n.isClone),
+            originMainId: String(n.originMainId || n.id),
+            directSponsorNodeId: String(n.directSponsorNodeId || 1),
           };
           if (ownerStr && ownerStr !== ethers.ZeroAddress) {
             uniqueOwners.add(ownerStr.toLowerCase());

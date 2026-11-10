@@ -30,7 +30,7 @@ const CONTRACT_ADDRESS =
   process.env.OVERRIDE_CONTRACT_ADDRESS ||
   process.env.CONTRACT_ADDRESS ||
   process.env.VITE_CONTRACT_ADDRESS ||
-  '0x98c2B26E052C63E3F520c75428cEA3CB5E0649e0';
+  '0x742D5249758F73683e95e5404d801f2Ac6755781';
 
 const WSS_ENDPOINTS = [
   process.env.WSS_URL || 'wss://bsc-testnet-rpc.publicnode.com',
@@ -274,6 +274,56 @@ export async function checkAndProcessPendingQueues(triggerSource: string): Promi
         console.warn(
           '⚠️ [WS-Bot] พบคิวโคลนค้างแต่ยังไม่ได้ตั้งค่า BOT_PRIVATE_KEY ใน .env (ทำงานในโหมดดักฟังและซิงค์ข้อมูล)'
         );
+      }
+    }
+
+    // 7.2 ตรวจสอบกระปุก Auto ID & Extra ID บนเชนสำหรับทุกรหัสหลักใน Rank 1 และยิงธุรกรรมให้อัตโนมัติทันทีที่ครบเกณฑ์
+    if (BOT_PRIVATE_KEY && BOT_PRIVATE_KEY.length >= 64) {
+      const botWallet = new ethers.Wallet(BOT_PRIVATE_KEY, httpProvider);
+      const writeContract = new ethers.Contract(CONTRACT_ADDRESS, BOT_CONTRACT_ABI, botWallet);
+
+      try {
+        const [totalR1Big, r1PriceBig] = await Promise.all([
+          readContract.totalNodesInRank(1).catch(() => 0n),
+          readContract.rankPrice(1).catch(() => ethers.parseUnits('5', 18)),
+        ]);
+        const totalR1 = Number(totalR1Big);
+        const minExtraPriceBig = r1PriceBig * 2n; // Rank 2 = 10 USDT
+
+        for (let mId = 1; mId <= totalR1; mId++) {
+          try {
+            const nodeData = await readContract.rankNodes(1, mId);
+            if (!nodeData || nodeData.isClone || nodeData.isExtraId || nodeData.owner === ethers.ZeroAddress) {
+              continue;
+            }
+            const pools = await readContract.getMainIdThreePools(nodeData.owner, mId);
+            const autoIdPoolBig: bigint = pools.newAutoIdPool;
+            const extraIdPoolBig: bigint = pools.newExtraIdPool;
+
+            if (r1PriceBig > 0n && autoIdPoolBig >= r1PriceBig) {
+              console.log(
+                `⚡ [WS-Bot] (${triggerSource}) รหัสหลัก #${mId} มียอด Auto ID Pool ครบเกณฑ์ -> สั่งรัน checkAndProcessAutoNewMainIdForNode(${mId})...`
+              );
+              const autoTx = await writeContract.checkAndProcessAutoNewMainIdForNode(mId);
+              await autoTx.wait(1);
+              console.log(`✅ [WS-Bot] สร้าง Auto ID สำเร็จสำหรับ Main #${mId}! TX: ${autoTx.hash}`);
+            }
+
+            if (minExtraPriceBig > 0n && extraIdPoolBig >= minExtraPriceBig) {
+              console.log(
+                `⚡ [WS-Bot] (${triggerSource}) รหัสหลัก #${mId} มียอด Extra ID Pool ถึงเกณฑ์ -> สั่งรัน processPendingExtraIdQueue(${mId}, 2)...`
+              );
+              const extraTx = await writeContract.processPendingExtraIdQueue(mId, 2);
+              await extraTx.wait(1);
+              console.log(`✅ [WS-Bot] สร้าง Extra ID สำเร็จสำหรับ Main #${mId}! TX: ${extraTx.hash}`);
+            }
+          } catch {
+            // ข้ามโหนดที่ไม่เข้าเงื่อนไขหรือเกิดข้อผิดพลาดชั่วคราว
+          }
+        }
+      } catch (poolErr: unknown) {
+        const pMsg = poolErr instanceof Error ? poolErr.message : String(poolErr);
+        console.warn(`⚠️ [WS-Bot] ข้อผิดพลาดขณะเช็คกระปุก Auto/Extra ID (${triggerSource}): ${pMsg}`);
       }
     }
   } catch (err: unknown) {
