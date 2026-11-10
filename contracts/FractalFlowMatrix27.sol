@@ -498,12 +498,29 @@ contract FractalFlowMatrix27 is Ownable, ReentrancyGuard {
 
     function _creditVault(uint8 _rank, uint256 _fromNodeId, uint256 _targetNodeId, uint256 _amount) internal {
         uint256 vNodeId = _targetNodeId > 0 && _targetNodeId <= totalNodesInRank[_rank] ? _targetNodeId : 1;
+        if (rankNodes[_rank][vNodeId].isClone && nodeOriginMainId[_rank][vNodeId] > 0) {
+            uint256 origId = nodeOriginMainId[_rank][vNodeId];
+            if (origId <= totalNodesInRank[_rank]) {
+                vNodeId = origId;
+            }
+        }
         address vOwner = rankNodes[_rank][vNodeId].owner;
         if (vOwner != address(0)) {
             users[vOwner].upgradeVault[_rank] += _amount;
         }
         nodeUpgradeVault[_rank][vNodeId] += _amount;
         emit RewardDistributed(_fromNodeId, vNodeId, vOwner, _rank, "UPGRADE_VAULT", _amount);
+
+        uint256 r1MainId = _rank == 1 ? vNodeId : nodeOriginMainId[_rank][vNodeId];
+        if (r1MainId == 0) r1MainId = 1;
+        if (gasleft() > 350000) {
+            if (_rank <= 3) {
+                checkAndProcessAutoNewMainIdForNode(r1MainId);
+            }
+            if (gasleft() > 350000) {
+                processPendingExtraIdQueue(r1MainId, 1);
+            }
+        }
     }
 
     /**

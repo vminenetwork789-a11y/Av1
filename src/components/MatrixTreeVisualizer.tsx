@@ -1879,6 +1879,9 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
                 cloneRoundTracker.set(origKey, nextCnt);
                 onChainCloneRoundMap.set(fs.id, ((nextCnt - 1) % 2) + 1);
               }
+              if (fs.originType) {
+                onChainOriginTypeMap.set(fs.id, fs.originType);
+              }
             }
           }
         }

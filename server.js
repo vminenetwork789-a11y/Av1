@@ -188,16 +188,17 @@ var SERVER_LEGACY_CONTRACTS = /* @__PURE__ */ new Set([
   "0x9ed96af9128f0791fd883dee7ade2c728d2cec11",
   "0xcd581c30aceba9d6c81baaea5b9f88d8aaa54a42",
   "0xffc4336bb0bb6da36254466a7d0c5e9566ac5349",
-  "0x98c2b26e052c63e3f520c75428cea3cb5e0649e0"
+  "0x98c2b26e052c63e3f520c75428cea3cb5e0649e0",
+  "0x742d5249758f73683e95e5404d801f2ac6755781"
 ]);
 var SERVER_LEGACY_USDT = /* @__PURE__ */ new Set([
   "0x95856be9c16afc9c147c034cd6a514d730bd90ba"
 ]);
 var rawEnvContract = (process.env.OVERRIDE_CONTRACT_ADDRESS || process.env.CONTRACT_ADDRESS || "").trim();
-var resolvedDefaultContract = rawEnvContract && !SERVER_LEGACY_CONTRACTS.has(rawEnvContract.toLowerCase()) ? rawEnvContract : "0x742D5249758F73683e95e5404d801f2Ac6755781";
+var resolvedDefaultContract = rawEnvContract && !SERVER_LEGACY_CONTRACTS.has(rawEnvContract.toLowerCase()) ? rawEnvContract : "0x51e6fB0c0197f8A26C83d02B47363E90e092EaF4";
 var DEFAULT_SYSTEM_CONFIG = {
   contractAddress: resolvedDefaultContract,
-  buildDefaultContract: "0x742D5249758F73683e95e5404d801f2Ac6755781",
+  buildDefaultContract: "0x51e6fB0c0197f8A26C83d02B47363E90e092EaF4",
   usdtAddress: process.env.USDT_ADDRESS || "0x05f24E1F598DF1aE8d0B424ce978f8ea33bB752b",
   chainId: Number(process.env.CHAIN_ID || 97),
   networkName: process.env.NETWORK_NAME || "BNB Smart Chain Testnet",
@@ -1365,10 +1366,10 @@ function reconcileRankTreeLinks(nodes) {
       }
       const deltaLc = lcAfter - lcBefore;
       const baseVal = Number(m.reconciledBaseVault ?? m.nodeVault ?? rawVal);
-      const adjustedVault = deltaLc !== 0 ? Math.max(0, Number((rawVal + deltaLc * rUnitVault).toFixed(4))) : baseVal;
+      const adjustedVault = deltaLc !== 0 && !nodes.some((n) => n.isLocalUpgrade) ? Math.max(0, Number((rawVal + deltaLc * rUnitVault).toFixed(4))) : baseVal;
       m.nodeVault = adjustedVault;
       m.reconciledBaseVault = adjustedVault;
-      if (deltaLc !== 0) {
+      if (deltaLc !== 0 && !nodes.some((n) => n.isLocalUpgrade)) {
         m.rawNodeVault = adjustedVault;
       }
     }
@@ -1742,21 +1743,25 @@ function reconcileRank1AutoMainIds() {
   }
   return autoMainSourceMap;
 }
-function reconcileAutoExtraIdsAcrossRanks() {
+function reconcileAutoExtraIdsAcrossRanks(runLocalCascades = true) {
   const createdExtraNodes = [];
   for (let r = 1; r <= 27; r++) {
     const rList = matrixDB.nodesByRank[r];
     if (!Array.isArray(rList) || rList.length === 0) continue;
-    const realNodes = rList.filter((n) => !n.isSyntheticExtra);
+    const realNodes = rList.filter(
+      (n) => !n.isSyntheticExtra && !n.isAutoCascadeNode
+    );
     const realIds = new Set(realNodes.map((n) => n.id));
     for (const n of realNodes) {
       if (n.leftChild > 0 && !realIds.has(n.leftChild)) n.leftChild = 0;
       if (n.rightChild > 0 && !realIds.has(n.rightChild)) n.rightChild = 0;
-      if (n.reconciledBaseVault === void 0) {
-        n.reconciledBaseVault = Number(n.nodeVault ?? n.rawNodeVault ?? 0);
-      } else {
-        n.nodeVault = Number(n.reconciledBaseVault);
-      }
+      const baseOnChainVal = Number(
+        n.onChainVault ?? n.rawNodeVault ?? n.nodeVault ?? 0
+      );
+      n.nodeVault = baseOnChainVal;
+      n.rawNodeVault = baseOnChainVal;
+      n.reconciledBaseVault = baseOnChainVal;
+      n.hasLocalVaultMutation = false;
     }
     matrixDB.nodesByRank[r] = reconcileRankTreeLinks(realNodes);
     matrixDB.rankCounts[r] = Math.max(1, matrixDB.nodesByRank[r].length);
@@ -1827,6 +1832,31 @@ function reconcileAutoExtraIdsAcrossRanks() {
     for (const [oKey, sumVal] of ownerVaultSums.entries()) {
       if (!matrixDB.userRankVaults[oKey]) matrixDB.userRankVaults[oKey] = {};
       matrixDB.userRankVaults[oKey][r] = sumVal;
+    }
+  }
+  if (runLocalCascades) {
+    const cascadeResult = processLocalAutoAndExtraIdCascades();
+    for (const ex of cascadeResult.spawnedExtraNodes) {
+      createdExtraNodes.push(ex);
+    }
+    for (const au of cascadeResult.spawnedAutoNodes) {
+      createdExtraNodes.push(au);
+    }
+    for (let r = 1; r <= 27; r++) {
+      const rList = matrixDB.nodesByRank[r] || [];
+      const ownerVaultSums = /* @__PURE__ */ new Map();
+      for (const mNode of rList) {
+        if (mNode.isClone || mNode.isExtraId) continue;
+        if (mNode.owner && mNode.owner !== ethers.ZeroAddress) {
+          const oKey = mNode.owner.toLowerCase();
+          const v = Number(mNode.nodeVault ?? mNode.rawNodeVault ?? 0);
+          ownerVaultSums.set(oKey, Number(((ownerVaultSums.get(oKey) || 0) + v).toFixed(4)));
+        }
+      }
+      for (const [oKey, sumVal] of ownerVaultSums.entries()) {
+        if (!matrixDB.userRankVaults[oKey]) matrixDB.userRankVaults[oKey] = {};
+        matrixDB.userRankVaults[oKey][r] = sumVal;
+      }
     }
   }
   return createdExtraNodes;
@@ -1962,6 +1992,7 @@ function processLocalAutoAndExtraIdCascades(targetMainId) {
             isLocalUpgrade: true,
             createdAt: (/* @__PURE__ */ new Date()).toISOString()
           };
+          newUpgradedNode.isAutoCascadeNode = true;
           nextRankList.push(newUpgradedNode);
           const upgParentNode = nextRankList.find((x) => x.id === upgParentId);
           const rightTriggerQueue = [];
@@ -2001,6 +2032,7 @@ function processLocalAutoAndExtraIdCascades(targetMainId) {
               isLocalUpgrade: true,
               createdAt: (/* @__PURE__ */ new Date()).toISOString()
             };
+            cloneNode.isAutoCascadeNode = true;
             nextRankList.push(cloneNode);
             const cParent = nextRankList.find((x) => x.id === clonePlacement.parentId);
             if (cParent) {
@@ -2084,6 +2116,7 @@ function processLocalAutoAndExtraIdCascades(targetMainId) {
             isLocalUpgrade: true,
             createdAt: (/* @__PURE__ */ new Date()).toISOString()
           };
+          newAutoNode.isAutoCascadeNode = true;
           currentR1List.push(newAutoNode);
           const parentNode = currentR1List.find((x) => x.id === parentIdNum);
           const rightTriggerQueue = [];
@@ -2123,6 +2156,7 @@ function processLocalAutoAndExtraIdCascades(targetMainId) {
               isLocalUpgrade: true,
               createdAt: (/* @__PURE__ */ new Date()).toISOString()
             };
+            cloneNode.isAutoCascadeNode = true;
             currentR1List.push(cloneNode);
             const cParent = currentR1List.find((x) => x.id === clonePlacement.parentId);
             if (cParent) {
@@ -2214,6 +2248,7 @@ function processLocalAutoAndExtraIdCascades(targetMainId) {
             isLocalUpgrade: true,
             createdAt: (/* @__PURE__ */ new Date()).toISOString()
           };
+          newExtraNode.isAutoCascadeNode = true;
           targetRankList.push(newExtraNode);
           const parentNode = targetRankList.find((x) => x.id === parentIdNum);
           const rightTriggerQueue = [];
@@ -2253,6 +2288,7 @@ function processLocalAutoAndExtraIdCascades(targetMainId) {
               isLocalUpgrade: true,
               createdAt: (/* @__PURE__ */ new Date()).toISOString()
             };
+            cloneNode.isAutoCascadeNode = true;
             targetRankList.push(cloneNode);
             const cParent = targetRankList.find((x) => x.id === clonePlacement.parentId);
             if (cParent) {
@@ -3664,7 +3700,7 @@ async function startApp() {
           let originType = "MANUAL_REGISTER";
           if (isClone) originType = "CLONE";
           else if (isExtraId) originType = "AUTO_EXTRA";
-          return {
+          const fetchedNode = {
             id,
             rank: rankNum,
             owner: String(raw.owner ?? raw[1] ?? ethers.ZeroAddress),
@@ -3684,6 +3720,8 @@ async function startApp() {
             originType,
             createdAt: (/* @__PURE__ */ new Date()).toISOString()
           };
+          fetchedNode.onChainVault = rawVaultVal;
+          return fetchedNode;
         }
         return null;
       } catch {
@@ -3765,6 +3803,7 @@ async function startApp() {
                   ]);
                   const dec = rawV >= 100000000000000n ? 18 : activeUsdtDecimals || 18;
                   const val = Number(ethers.formatUnits(rawV, dec));
+                  mNode.onChainVault = val;
                   mNode.rawNodeVault = val;
                   mNode.nodeVault = val;
                   mNode.reconciledBaseVault = val;
@@ -4237,6 +4276,8 @@ async function startApp() {
     return {
       mainId: mainIdNum,
       owner: targetNode?.owner || ethers.ZeroAddress,
+      directSponsor: targetNode?.directSponsor && targetNode.directSponsor !== ethers.ZeroAddress ? targetNode.directSponsor : matrixDB.systemWallets.rootOwner,
+      directSponsorNodeId: targetNode?.directSponsorNodeId && targetNode.directSponsorNodeId > 0 ? targetNode.directSponsorNodeId : mainIdNum === 1 ? 0 : 1,
       currentRank,
       window5Start,
       window5End,

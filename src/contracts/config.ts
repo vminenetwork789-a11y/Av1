@@ -41,6 +41,7 @@ const LEGACY_CONTRACT_ADDRESSES = new Set([
   '0xcd581c30aceba9d6c81baaea5b9f88d8aaa54a42',
   '0xffc4336bb0bb6da36254466a7d0c5e9566ac5349',
   '0x98c2b26e052c63e3f520c75428cea3cb5e0649e0',
+  '0x742d5249758f73683e95e5404d801f2ac6755781',
 ]);
 
 const LEGACY_USDT_ADDRESSES = new Set([
@@ -51,7 +52,7 @@ const envContractAddr = import.meta.env?.VITE_CONTRACT_ADDRESS?.trim();
 export const DEFAULT_CONTRACT_ADDRESS =
   envContractAddr && !LEGACY_CONTRACT_ADDRESSES.has(envContractAddr.toLowerCase())
     ? envContractAddr
-    : '0x742D5249758F73683e95e5404d801f2Ac6755781';
+    : '0x51e6fB0c0197f8A26C83d02B47363E90e092EaF4';
 export const DEFAULT_USDT_ADDRESS =
   import.meta.env?.VITE_USDT_ADDRESS || '0x05f24E1F598DF1aE8d0B424ce978f8ea33bB752b';
 

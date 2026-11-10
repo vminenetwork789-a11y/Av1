@@ -829,42 +829,6 @@ export async function loadOnChainRank1State(
     }
   }
 
-  // OVERLAY ACTIVE FIFO QUEUE RESERVATIONS (RACE CONDITION PROTECTION)
-  try {
-    const queueRes = await fetch('/api/queue/status');
-    if (queueRes.ok) {
-      const queueData = await queueRes.json();
-      if (queueData.activeReservations && Array.isArray(queueData.activeReservations)) {
-        const now = Date.now();
-        for (const res of queueData.activeReservations) {
-          if (res.status === 'RESERVED' && now <= res.expiresAt) {
-            for (const item of res.batchDetails) {
-              const pKey = String(item.targetParentId);
-              if (rankNodes[pKey]) {
-                if (item.isLeft) {
-                  rankNodes[pKey].leftChild = BigInt(item.assignedNodeId);
-                } else {
-                  rankNodes[pKey].rightChild = BigInt(item.assignedNodeId);
-                }
-              }
-              rankNodes[String(item.assignedNodeId)] = {
-                id: BigInt(item.assignedNodeId),
-                owner: item.owner,
-                directSponsor: res.sponsorAddress,
-                parentId: BigInt(item.targetParentId),
-                leftChild: 0n,
-                rightChild: 0n,
-                isClone: Boolean(item.isClone),
-              };
-            }
-          }
-        }
-      }
-    }
-  } catch {
-    // Ignore queue fetch error in offline/disconnected environments
-  }
-
   return {
     rankNodes,
     ownerProfiles,
@@ -1181,7 +1145,12 @@ export async function calculateFrontendPayoutPayload(
       parentNode?.isClone
         ? parentNode.originMainId || parentMeta?.originMainId || effectiveParentIdStr
         : effectiveParentIdStr || '1';
-    const pIdBn = BigInt(parentOriginMainIdStr || '1');
+    let pIdBn = BigInt(parentOriginMainIdStr || '1');
+    const effNodeBn = BigInt(effectiveNodeIdStr || '0');
+    if (effNodeBn > 1n && pIdBn >= effNodeBn) {
+      const fallbackParent = BigInt(effectiveParentIdStr || '1');
+      pIdBn = fallbackParent > 0n && fallbackParent < effNodeBn ? fallbackParent : 1n;
+    }
     if (pIdBn > 0n) {
       vaultTargetNodeId = pIdBn;
       vaultTargetsSet.add(pIdBn.toString());
@@ -1331,24 +1300,64 @@ export async function prepareUpgradePlacementAndPayouts(
 
   // หาผู้แนะนำของ r1MainId จากผัง Rank 1
   let sponsorTargetRankNodeId = 1n;
+  let r1SponsorMainId = 1;
   try {
     const r1Res = await fetch(`/api/matrix/main-id/${r1MainId}`);
     if (r1Res.ok) {
       const r1Data = await r1Res.json();
-      if (r1Data?.directSponsor && r1Data.directSponsor !== ethers.ZeroAddress) {
-        sponsorAddress = String(r1Data.directSponsor);
+      const rawSponsor = r1Data?.directSponsor || r1Data?.data?.directSponsor;
+      const rawSponsorNodeId = Number(
+        r1Data?.directSponsorNodeId ?? r1Data?.data?.directSponsorNodeId ?? 0
+      );
+      if (rawSponsor && rawSponsor !== ethers.ZeroAddress) {
+        sponsorAddress = String(rawSponsor);
+      }
+      if (rawSponsorNodeId > 0) {
+        r1SponsorMainId = rawSponsorNodeId;
       }
     }
   } catch {
     // ignore
   }
 
-  // ค้นหาโหนดหลักของผู้แนะนำใน targetRank
-  const sponsorNodesInTarget = Object.values(rankNodes)
-    .filter((n) => !n.isClone && (n.owner || '').toLowerCase() === sponsorAddress.toLowerCase())
+  // Fallback อ่านผู้แนะนำตรงจาก Smart Contract ผัง Rank 1 หากยังไม่ได้ค่าที่ถูกต้อง
+  if (
+    !sponsorAddress ||
+    sponsorAddress === ethers.ZeroAddress ||
+    (r1MainId > 1 && sponsorAddress.toLowerCase() === userAddress.toLowerCase())
+  ) {
+    try {
+      const r1NodeOnChain = await contract.rankNodes(1, r1MainId);
+      const chainSponsor = String(r1NodeOnChain.directSponsor ?? r1NodeOnChain[2] ?? ethers.ZeroAddress);
+      if (chainSponsor && chainSponsor !== ethers.ZeroAddress) {
+        sponsorAddress = chainSponsor;
+      } else {
+        const rootNodeOnChain = await contract.rankNodes(1, 1);
+        sponsorAddress = String(rootNodeOnChain.owner ?? rootNodeOnChain[1] ?? sponsorAddress);
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  // ค้นหาโหนดหลักของผู้แนะนำใน targetRank (ตรวจสอบจาก originMainId ก่อน แล้วจึงตรวจสอบจาก owner)
+  const sponsorNodesByOrigin = Object.values(rankNodes)
+    .filter(
+      (n) =>
+        !n.isClone &&
+        (Number(n.originMainId || n.id) === r1SponsorMainId ||
+          (r1SponsorMainId === 1 && n.id === 1n))
+    )
     .sort((a, b) => Number(a.id - b.id));
-  if (sponsorNodesInTarget.length > 0) {
-    sponsorTargetRankNodeId = sponsorNodesInTarget[0].id;
+  if (sponsorNodesByOrigin.length > 0) {
+    sponsorTargetRankNodeId = sponsorNodesByOrigin[0].id;
+  } else {
+    const sponsorNodesInTarget = Object.values(rankNodes)
+      .filter((n) => !n.isClone && (n.owner || '').toLowerCase() === sponsorAddress.toLowerCase())
+      .sort((a, b) => Number(a.id - b.id));
+    if (sponsorNodesInTarget.length > 0) {
+      sponsorTargetRankNodeId = sponsorNodesInTarget[0].id;
+    }
   }
 
   const slot = findDirectSponsorOrCloneSlot(rankNodes, sponsorAddress, sponsorTargetRankNodeId);

@@ -1023,13 +1023,17 @@ export function useWeb3() {
         let usedPayouts = false;
         if (payoutPayload && payoutPayload.recipients.length > 0 && typeof matrixContract.registerWithPayouts === 'function') {
           try {
+            const safeVaultTargetId =
+              autoIsLeft && payoutPayload.vaultTargetNodeId > BigInt(autoParentId)
+                ? BigInt(autoParentId)
+                : payoutPayload.vaultTargetNodeId;
             await matrixContract.registerWithPayouts.staticCall(
               BigInt(sponsorNodeId),
               BigInt(autoParentId),
               Boolean(autoIsLeft),
               payoutPayload.recipients,
               payoutPayload.amounts,
-              payoutPayload.vaultTargetNodeId,
+              safeVaultTargetId,
               payoutPayload.vaultAmount
             );
             regTx = await matrixContract.registerWithPayouts(
@@ -1038,7 +1042,7 @@ export function useWeb3() {
               Boolean(autoIsLeft),
               payoutPayload.recipients,
               payoutPayload.amounts,
-              payoutPayload.vaultTargetNodeId,
+              safeVaultTargetId,
               payoutPayload.vaultAmount
             );
             usedPayouts = true;
