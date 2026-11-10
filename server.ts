@@ -715,6 +715,7 @@ export interface IndexedTreeNode {
   reconciledBaseVault?: number;
   extraPoolBonusOnChain?: number;
   isLocalUpgrade?: boolean;
+  hasLocalVaultMutation?: boolean;
   originType?: 'MANUAL_REGISTER' | 'AUTO_MAIN' | 'AUTO_NEW_MAIN' | 'AUTO_EXTRA' | 'CLONE';
   createdAt?: string;
 }
@@ -5086,8 +5087,20 @@ async function startApp() {
           );
           for (const item of chunkResults) {
             if (item) {
-              const prevCreatedAt = mergedMap.get(item.id)?.createdAt;
+              const prevNode =
+                mergedMap.get(item.id) ||
+                realExisting.find((e) => e.id === item.id && !e.isLocalUpgrade);
+              const prevCreatedAt = prevNode?.createdAt;
               item.createdAt = prevCreatedAt || new Date().toISOString();
+              if (prevNode && prevNode.hasLocalVaultMutation) {
+                item.nodeVault = prevNode.nodeVault;
+                item.rawNodeVault = prevNode.rawNodeVault;
+                item.reconciledBaseVault = prevNode.reconciledBaseVault ?? prevNode.nodeVault;
+                if (typeof prevNode.extraPoolBonusOnChain === 'number') {
+                  item.extraPoolBonusOnChain = prevNode.extraPoolBonusOnChain;
+                }
+                item.hasLocalVaultMutation = true;
+              }
               mergedMap.set(item.id, item);
               newlyFetchedNodes.push(item);
             }
@@ -5115,8 +5128,20 @@ async function startApp() {
             );
             for (const pItem of refreshedNodes) {
               if (pItem) {
-                const prevCreatedAt = mergedMap.get(pItem.id)?.createdAt;
+                const prevNode =
+                  mergedMap.get(pItem.id) ||
+                  realExisting.find((e) => e.id === pItem.id && !e.isLocalUpgrade);
+                const prevCreatedAt = prevNode?.createdAt;
                 if (prevCreatedAt) pItem.createdAt = prevCreatedAt;
+                if (prevNode && prevNode.hasLocalVaultMutation) {
+                  pItem.nodeVault = prevNode.nodeVault;
+                  pItem.rawNodeVault = prevNode.rawNodeVault;
+                  pItem.reconciledBaseVault = prevNode.reconciledBaseVault ?? prevNode.nodeVault;
+                  if (typeof prevNode.extraPoolBonusOnChain === 'number') {
+                    pItem.extraPoolBonusOnChain = prevNode.extraPoolBonusOnChain;
+                  }
+                  pItem.hasLocalVaultMutation = true;
+                }
                 mergedMap.set(pItem.id, pItem);
               }
             }
@@ -5393,6 +5418,8 @@ async function startApp() {
     const mainIdxInOwner = Math.max(0, r1OwnerMains.indexOf(mainIdNum));
 
     let currentRank = mainIdNum === 1 ? 27 : 1;
+    let onChainCurrentRank = mainIdNum === 1 ? 27 : 1;
+    let hasLocalUpgrades = false;
     const vaultsByRank: Record<number, number> = {};
 
     for (let r = 1; r <= 27; r++) {
@@ -5405,6 +5432,11 @@ async function startApp() {
         );
         if (correspondingNode) {
           currentRank = Math.max(currentRank, r);
+          if (correspondingNode.isLocalUpgrade) {
+            hasLocalUpgrades = true;
+          } else {
+            onChainCurrentRank = Math.max(onChainCurrentRank, r);
+          }
           vaultsByRank[r] = Number(correspondingNode.nodeVault || 0);
         } else {
           vaultsByRank[r] = 0;
@@ -5412,7 +5444,10 @@ async function startApp() {
       }
     }
 
-    if (mainIdNum === 1) currentRank = 27;
+    if (mainIdNum === 1) {
+      currentRank = 27;
+      onChainCurrentRank = 27;
+    }
     const window5Start = Math.max(1, currentRank - 4);
     const window5End = currentRank;
 
@@ -5652,6 +5687,8 @@ async function startApp() {
           ? 0
           : 1,
       currentRank,
+      onChainCurrentRank,
+      hasLocalUpgrades,
       window5Start,
       window5End,
       vaultsByRank,
@@ -5789,9 +5826,12 @@ async function startApp() {
   app.get('/api/matrix/per-id-history', async (req: Request, res: Response) => {
     try {
       const forceSync = req.query.forceSync === '1';
-      if (forceSync || !matrixDB.nodesByRank[1] || matrixDB.nodesByRank[1].length <= 1) {
-        await syncAllMatrixDatabase(CONTRACT_ADDRESS, forceSync);
+      if (!matrixDB.nodesByRank[1] || matrixDB.nodesByRank[1].length <= 1) {
+        await syncAllMatrixDatabase(CONTRACT_ADDRESS, false);
       } else {
+        if (forceSync) {
+          syncAllMatrixDatabase(CONTRACT_ADDRESS, false).catch(() => {});
+        }
         reconcileAutoExtraIdsAcrossRanks();
         if (matrixDB.rewardLogs.length === 0) rebuildDatabaseRewardLogsFromNodes();
         if (!matrixDB.upgradeLogs || matrixDB.upgradeLogs.length === 0) rebuildDatabaseUpgradeLogsFromNodes();
@@ -7848,8 +7888,13 @@ async function startApp() {
       const rankNum = Math.min(Math.max(Number(targetRank) || 2, 2), 27);
       const mainIdNum = Math.max(1, Number(mainId) || 1);
 
+      if (!matrixDB.nodesByRank[1] || matrixDB.nodesByRank[1].length <= 1) {
+        await syncRankIntoDatabase(1, CONTRACT_ADDRESS, false).catch(() => {});
+      }
       const r1Nodes = matrixDB.nodesByRank[1] || [];
-      const mainNodeR1 = r1Nodes.find((n) => n.id === mainIdNum && !n.isClone && !n.isExtraId);
+      const mainNodeR1 =
+        r1Nodes.find((n) => n.id === mainIdNum && !n.isClone && !n.isExtraId) ||
+        r1Nodes.find((n) => n.id === mainIdNum && !n.isClone);
       if (!mainNodeR1) {
         return res.status(404).json({
           success: false,
@@ -7874,12 +7919,14 @@ async function startApp() {
       }
 
       if (rankNum <= currentRank) {
+        const currentStats = computeMainIdDatabaseStats(mainIdNum);
         return res.json({
           success: true,
           source: 'DATABASE_SIMULATION',
           mainId: mainIdNum,
           currentRank,
-          targetRank: rankNum,
+          targetRank: currentRank,
+          stats: currentStats,
           txHash: `0xupg${Date.now().toString(16)}`,
           message: `รหัสหลัก #${mainIdNum} อยู่ใน Rank ${currentRank} เรียบร้อยแล้ว`,
         });
@@ -7927,11 +7974,13 @@ async function startApp() {
               : wrList.find((n) => !n.isClone && !n.isExtraId && n.originMainId === mainIdNum);
           if (wrNode && Number(wrNode.nodeVault || 0) > 0) {
             const avail = Number(wrNode.nodeVault || 0);
+            if (wrNode.rawNodeVault === undefined || wrNode.rawNodeVault < avail) {
+              wrNode.rawNodeVault = avail;
+            }
             const deduct = Math.min(avail, remDeduct);
             wrNode.nodeVault = Number(Math.max(0, avail - deduct).toFixed(4));
-            wrNode.rawNodeVault = wrNode.nodeVault;
             wrNode.reconciledBaseVault = wrNode.nodeVault;
-            (wrNode as any).hasLocalVaultMutation = true;
+            wrNode.hasLocalVaultMutation = true;
             remDeduct = Number(Math.max(0, remDeduct - deduct).toFixed(4));
             totalVaultDeducted = Number((totalVaultDeducted + deduct).toFixed(4));
           }
@@ -8039,12 +8088,16 @@ async function startApp() {
       rebuildDatabaseUpgradeLogsFromNodes();
       saveMatrixDBToDisk(true);
 
+      const updatedStats = computeMainIdDatabaseStats(mainIdNum);
+
       res.json({
         success: true,
         source: 'DATABASE_SIMULATION',
         mainId: mainIdNum,
         fromRank: currentRank,
+        currentRank: rankNum,
         targetRank: rankNum,
+        stats: updatedStats,
         txHash: `0xupg${Date.now().toString(16)}`,
         message: `🚀 อัปเกรดรหัสหลัก #${mainIdNum} สู่ Rank ${rankNum} สำเร็จเรียบร้อยแล้ว!`,
       });
@@ -8782,8 +8835,17 @@ async function startApp() {
     const targetContract = (req.query.contract as string) || CONTRACT_ADDRESS;
     const forceSync = req.query.forceSync === '1';
 
-    if (forceSync || Object.keys(matrixDB.rankCounts).length === 0) {
-      await syncAllMatrixDatabase(targetContract, forceSync);
+    if (Object.keys(matrixDB.rankCounts).length === 0) {
+      await syncAllMatrixDatabase(targetContract, false);
+    } else if (forceSync) {
+      syncAllMatrixDatabase(targetContract, false).catch(() => {});
+    }
+
+    for (let r = 1; r <= 27; r++) {
+      const rList = matrixDB.nodesByRank[r];
+      if (Array.isArray(rList) && rList.length > 0) {
+        matrixDB.rankCounts[r] = Math.max(matrixDB.rankCounts[r] || 1, rList.length);
+      }
     }
 
     return res.json({
