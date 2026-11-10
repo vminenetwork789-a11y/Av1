@@ -7194,9 +7194,29 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
               message: okMsg,
               txHash: confirmedTxHash,
             });
+
+            // อัปเดตสถานะ Rank ของ Main ID ในหน้าต่างทันทีและปลดล็อกปุ่มให้กด Rank ถัดไปได้ทันทีโดยไม่ต้องรอซิงค์ช้า
+            modalNode.targetMainIdCurrentRank = Math.max(
+              Number(modalNode.targetMainIdCurrentRank || 1),
+              rankToUpgrade
+            );
+            setPerIdReportsMap((prev) => {
+              const next = new Map(prev);
+              const existing = next.get(targetMainId);
+              if (existing) {
+                next.set(targetMainId, {
+                  ...existing,
+                  currentMaxRank: Math.max(Number(existing.currentMaxRank || 1), rankToUpgrade),
+                });
+              }
+              return next;
+            });
             setModalUpgradeTargetRank(Math.min(27, rankToUpgrade + 1));
-            await fetchPerIdHistoryForModal(true);
-            await loadOnChainTree(selectedRank, { silent: false, forceSync: true });
+            setIsModalUpgrading(false);
+
+            // รีเฟรชข้อมูลผังและประวัติจากฐานข้อมูลแบบไม่บล็อกปุ่ม
+            fetchPerIdHistoryForModal(false).catch(() => {});
+            loadOnChainTree(selectedRank, { silent: true, forceSync: false }).catch(() => {});
             if (typeof window !== 'undefined') {
               window.dispatchEvent(new CustomEvent('matrix:tree:refresh'));
             }

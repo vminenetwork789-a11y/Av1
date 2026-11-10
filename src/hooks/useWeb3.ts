@@ -20,6 +20,8 @@ import { UserProfile } from '../types';
 import {
   executeOffChainSimulationAndBatch,
   previewOffChainSimulation,
+  calculateFrontendPayoutPayload,
+  prepareUpgradePlacementAndPayouts,
   ApplicantItem,
   PlacementMode,
 } from '../utils/offChainSimulator';
@@ -964,49 +966,98 @@ export function useWeb3() {
         await approveTx.wait();
       }
 
-      // เงื่อนไขสมัครสมาชิก: จะต้องไปต่อติดตัวของผู้แนะนำตรง Direct Sponsor ซ้ายก่อนขวา
-      // แต่ถ้าผู้แนะนำตรง Direct Sponsor ไม่มีช่องว่าง ก็ให้ไปวางต่อติดตัวโคลนนิ่ง Direct Sponsor เท่านั้น
-      if (!autoParentId || autoParentId === 0) {
-        try {
-          const sim = await previewOffChainSimulation(
-            signer,
-            currentContract,
-            sponsorNodeId,
-            [{ owner: userAddr }],
-            undefined,
-            modeToUse
-          );
-          if (sim.targetParentIds.length > 0) {
-            autoParentId = Number(sim.targetParentIds[0]);
-            autoIsLeft = Boolean(sim.isLefts[0]);
-          }
-        } catch (simErr) {
-          console.warn('Simulation notice:', simErr);
+      // คำนวณตำแหน่งและรายการกระเป๋าผู้รับค่าคอมมิชชันจากหน้าบ้าน (Off-Chain Payout Calculator)
+      let latestSimForPayout: any = null;
+      try {
+        latestSimForPayout = await previewOffChainSimulation(
+          signer,
+          currentContract,
+          sponsorNodeId,
+          [{ owner: userAddr }],
+          undefined,
+          modeToUse
+        );
+        if ((!autoParentId || autoParentId === 0) && latestSimForPayout.targetParentIds.length > 0) {
+          autoParentId = Number(latestSimForPayout.targetParentIds[0]);
+          autoIsLeft = Boolean(latestSimForPayout.isLefts[0]);
         }
+      } catch (simErr) {
+        console.warn('Simulation notice:', simErr);
       }
 
       const sideLabel = autoIsLeft ? 'LEFT ลูกซ้าย' : 'RIGHT ลูกขวา';
+
+      let payoutPayload: {
+        recipients: string[];
+        amounts: bigint[];
+        vaultTargetNodeId: bigint;
+        vaultAmount: bigint;
+      } | null = null;
+
+      if (latestSimForPayout && latestSimForPayout.stepLogs?.length > 0) {
+        try {
+          payoutPayload = await calculateFrontendPayoutPayload(
+            signer,
+            currentContract,
+            1,
+            price,
+            latestSimForPayout.simulatedRankNodes || {},
+            latestSimForPayout.stepLogs,
+            sponsorAddress
+          );
+        } catch (pErr) {
+          console.warn('Payout calculation notice:', pErr);
+        }
+      }
 
       setTxState((prev) => ({
         ...prev,
         step:
           autoParentId > 0
-            ? `ขั้นตอนที่ 2/2: ส่งลงตำแหน่ง (ต่อติดตัวผู้แนะนำตรง/โคลนนิ่ง) Parent #${autoParentId} (${sideLabel})... กรุณายืนยันใน MetaMask`
+            ? `ขั้นตอนที่ 2/2: ส่งลงตำแหน่ง Parent #${autoParentId} (${sideLabel}) พร้อมกระเป๋าผู้รับค่าคอมมิชชัน... กรุณายืนยันใน MetaMask`
             : `ขั้นตอนที่ 2/2: ส่งคำสั่งสมัครใต้ผู้แนะนำ #${sponsorNodeId} ค่าสมัคร 5 USDT... กรุณายืนยันใน MetaMask`,
       }));
 
-      let regTx;
+      let regTx: any;
       if (autoParentId > 0) {
-        try {
-          regTx = await matrixContract.registerBatch(
-            BigInt(sponsorNodeId),
-            1n,
-            [BigInt(autoParentId)],
-            [Boolean(autoIsLeft)],
-            [false]
-          );
-        } catch {
-          regTx = await matrixContract.register(BigInt(sponsorNodeId));
+        let usedPayouts = false;
+        if (payoutPayload && payoutPayload.recipients.length > 0 && typeof matrixContract.registerWithPayouts === 'function') {
+          try {
+            await matrixContract.registerWithPayouts.staticCall(
+              BigInt(sponsorNodeId),
+              BigInt(autoParentId),
+              Boolean(autoIsLeft),
+              payoutPayload.recipients,
+              payoutPayload.amounts,
+              payoutPayload.vaultTargetNodeId,
+              payoutPayload.vaultAmount
+            );
+            regTx = await matrixContract.registerWithPayouts(
+              BigInt(sponsorNodeId),
+              BigInt(autoParentId),
+              Boolean(autoIsLeft),
+              payoutPayload.recipients,
+              payoutPayload.amounts,
+              payoutPayload.vaultTargetNodeId,
+              payoutPayload.vaultAmount
+            );
+            usedPayouts = true;
+          } catch {
+            usedPayouts = false;
+          }
+        }
+        if (!usedPayouts) {
+          try {
+            regTx = await matrixContract.registerBatch(
+              BigInt(sponsorNodeId),
+              1n,
+              [BigInt(autoParentId)],
+              [Boolean(autoIsLeft)],
+              [false]
+            );
+          } catch {
+            regTx = await matrixContract.register(BigInt(sponsorNodeId));
+          }
         }
       } else {
         regTx = await matrixContract.register(BigInt(sponsorNodeId));
@@ -1124,18 +1175,84 @@ export function useWeb3() {
 
       const formattedParentIds = targetParentIds.map((id) => BigInt(id));
 
+      let batchPayouts: {
+        recipients: string[];
+        amounts: bigint[];
+        vaultTargetNodeId: bigint;
+        vaultAmount: bigint;
+      } | null = null;
+
+      try {
+        const applicantsList = Array.from({ length: count }, () => ({ owner: userAddr }));
+        const simBatch = await previewOffChainSimulation(
+          signer,
+          currentContract,
+          sponsorNodeId,
+          applicantsList,
+          undefined,
+          'contract_round'
+        );
+        batchPayouts = await calculateFrontendPayoutPayload(
+          signer,
+          currentContract,
+          1,
+          unitPrice,
+          simBatch.simulatedRankNodes || {},
+          simBatch.stepLogs,
+          simBatch.sponsorAddress
+        );
+      } catch (pErr) {
+        console.warn('Batch payout calculation notice:', pErr);
+      }
+
       setTxState((prev) => ({
         ...prev,
-        step: `กำลังส่งคำสั่ง registerBatch(${sponsorNodeId}, ${count}, [...]) เข้า Smart Contract...`,
+        step: `กำลังส่งคำสั่งสมัครแบบกลุ่ม (${count} โหนด) พร้อมรายการกระเป๋าผู้รับค่าคอมมิชชันเข้า Smart Contract...`,
       }));
 
-      const batchTx = await matrixContract.registerBatch(
-        BigInt(sponsorNodeId),
-        BigInt(count),
-        formattedParentIds,
-        isLefts,
-        isClones
-      );
+      let batchTx: any;
+      if (batchPayouts && batchPayouts.recipients.length > 0 && typeof matrixContract.registerBatchWithPayouts === 'function') {
+        try {
+          await matrixContract.registerBatchWithPayouts.staticCall(
+            BigInt(sponsorNodeId),
+            BigInt(count),
+            formattedParentIds,
+            isLefts,
+            isClones,
+            batchPayouts.recipients,
+            batchPayouts.amounts,
+            batchPayouts.vaultTargetNodeId,
+            batchPayouts.vaultAmount
+          );
+          batchTx = await matrixContract.registerBatchWithPayouts(
+            BigInt(sponsorNodeId),
+            BigInt(count),
+            formattedParentIds,
+            isLefts,
+            isClones,
+            batchPayouts.recipients,
+            batchPayouts.amounts,
+            batchPayouts.vaultTargetNodeId,
+            batchPayouts.vaultAmount
+          );
+        } catch {
+          batchTx = await matrixContract.registerBatch(
+            BigInt(sponsorNodeId),
+            BigInt(count),
+            formattedParentIds,
+            isLefts,
+            isClones
+          );
+        }
+      } else {
+        batchTx = await matrixContract.registerBatch(
+          BigInt(sponsorNodeId),
+          BigInt(count),
+          formattedParentIds,
+          isLefts,
+          isClones
+        );
+      }
 
       setTxState((prev) => ({
         ...prev,
@@ -1189,6 +1306,7 @@ export function useWeb3() {
 
     let mainIdOwner = '';
     let dbUpgradeRankPool = 0;
+    let dbCurrentRank = 1;
 
     if (mIdNum > 0) {
       try {
@@ -1199,15 +1317,8 @@ export function useWeb3() {
           if (typeof info.upgradeRankPool === 'number') {
             dbUpgradeRankPool = info.upgradeRankPool;
           }
-          if (typeof info.currentRank === 'number' && targetRank <= info.currentRank) {
-            setTxState({
-              isLoading: false,
-              step: '',
-              txHash: null,
-              error: `รหัสหลัก #${mIdNum} อยู่ใน Rank ${info.currentRank} เรียบร้อยแล้ว (ไม่สามารถกดย้อนหลังสู่ Rank ${targetRank} ได้)`,
-              successMessage: null,
-            });
-            return;
+          if (typeof info.currentRank === 'number') {
+            dbCurrentRank = info.currentRank;
           }
         }
       } catch {
@@ -1243,61 +1354,59 @@ export function useWeb3() {
           const matrixContract = new ethers.Contract(currentContract, MATRIX_ABI, signer);
           const usdtContract = new ethers.Contract(currentUsdt, USDT_ABI, signer);
 
-          let usdtDecimals = 18;
-          try {
-            usdtDecimals = Number(await usdtContract.decimals());
-          } catch {
-            usdtDecimals = 18;
-          }
+          // ดึงข้อมูลสำคัญจาก Smart Contract แบบขนานในครั้งเดียว (ลดเวลารอ RPC ก่อนเด้ง MetaMask)
+          const [rawDec, rawChainRank, rawVault, rawAllow, rawUsdtBal] = await Promise.all([
+            usdtContract.decimals().catch(() => 18),
+            mIdNum > 0 && typeof matrixContract.getMainIdCurrentRank === 'function'
+              ? matrixContract.getMainIdCurrentRank(BigInt(mIdNum)).catch(() => null)
+              : Promise.resolve(null),
+            mIdNum > 0 && typeof matrixContract.getAccumulatedVaultForMainId === 'function'
+              ? matrixContract.getAccumulatedVaultForMainId(BigInt(mIdNum)).catch(() => null)
+              : matrixContract.getAccumulatedVault(userAddr, Number(targetRank)).catch(() => null),
+            usdtContract.allowance(userAddr, currentContract).catch(() => 0n),
+            usdtContract.balanceOf(userAddr).catch(() => null),
+          ]);
 
-          let onChainCurrentRank = 1;
-          try {
-            if (mIdNum > 0 && typeof matrixContract.getMainIdCurrentRank === 'function') {
-              onChainCurrentRank = Math.max(1, Number(await matrixContract.getMainIdCurrentRank(BigInt(mIdNum))));
-            }
-          } catch {
-            onChainCurrentRank = Math.max(1, targetRank - 1);
+          const usdtDecimals = Number(rawDec) || 18;
+          const onChainCurrentRank =
+            rawChainRank !== null ? Math.max(1, Number(rawChainRank)) : Math.max(1, Math.min(dbCurrentRank, targetRank - 1));
+
+          if (targetRank <= onChainCurrentRank) {
+            fetch('/api/db/sync', { method: 'POST' }).catch(() => {});
+            setTxState({
+              isLoading: false,
+              step: '',
+              txHash: null,
+              error: `รหัสหลัก #${mIdNum} อยู่ใน Rank ${onChainCurrentRank} บนบล็อกเชนเรียบร้อยแล้ว (ไม่สามารถกดย้อนหลังสู่ Rank ${targetRank} ได้)`,
+              successMessage: null,
+            });
+            return;
           }
 
           const startStepRank = Math.min(Number(targetRank), onChainCurrentRank + 1);
           let totalRequiredUsdtBn = BigInt(0);
           for (let rStep = startStepRank; rStep <= Number(targetRank); rStep++) {
             const stepNominal = RANK_PRICES_USDT[rStep - 1] || 10;
-            try {
-              const pBn = await matrixContract.rankPrice(rStep);
-              totalRequiredUsdtBn += pBn;
-            } catch {
-              totalRequiredUsdtBn += ethers.parseUnits(stepNominal.toString(), usdtDecimals);
-            }
+            totalRequiredUsdtBn += ethers.parseUnits(stepNominal.toString(), usdtDecimals);
           }
 
-          let savedInVault: bigint = BigInt(0);
-          try {
-            if (mIdNum > 0 && typeof matrixContract.getAccumulatedVaultForMainId === 'function') {
-              try {
-                savedInVault = await matrixContract.getAccumulatedVaultForMainId(BigInt(mIdNum));
-              } catch {
-                savedInVault = ethers.parseUnits(dbUpgradeRankPool.toFixed(2), usdtDecimals);
-              }
-            } else {
-              savedInVault = await matrixContract.getAccumulatedVault(userAddr, Number(targetRank));
-            }
-          } catch {
-            savedInVault = ethers.parseUnits(dbUpgradeRankPool.toFixed(2), usdtDecimals);
-          }
+          const savedInVault: bigint =
+            rawVault !== null ? BigInt(rawVault) : ethers.parseUnits(dbUpgradeRankPool.toFixed(2), usdtDecimals);
 
           const amountToPay = totalRequiredUsdtBn > savedInVault ? totalRequiredUsdtBn - savedInVault : BigInt(0);
           const formattedDiffUsdt = Number(ethers.formatUnits(amountToPay, usdtDecimals)).toFixed(2);
           const vaultDeductedBn = savedInVault > totalRequiredUsdtBn ? totalRequiredUsdtBn : savedInVault;
           const formattedVaultDeducted = Number(ethers.formatUnits(vaultDeductedBn, usdtDecimals)).toFixed(2);
 
-          if (amountToPay > BigInt(0)) {
-            setTxState((prev) => ({
-              ...prev,
-              step: `ตรวจสอบสิทธิ์อนุมัติเหรียญ USDT สำหรับเงินส่วนต่าง ${formattedDiffUsdt} USDT (หักลบ Vault ${formattedVaultDeducted} USDT)...`,
-            }));
+          if (amountToPay > BigInt(0) && rawUsdtBal !== null && BigInt(rawUsdtBal) < amountToPay) {
+            const formattedHave = Number(ethers.formatUnits(rawUsdtBal, usdtDecimals)).toFixed(2);
+            throw new Error(
+              `ยอดเหรียญ USDT ในกระเป๋าไม่เพียงพอสำหรับการอัปเกรดสู่ Rank ${targetRank}! ต้องชำระส่วนต่าง ${formattedDiffUsdt} USDT (หัก Vault ${formattedVaultDeducted} USDT) แต่ในกระเป๋ามี ${formattedHave} USDT`
+            );
+          }
 
-            const currentAllowance = await usdtContract.allowance(userAddr, currentContract);
+          if (amountToPay > BigInt(0)) {
+            const currentAllowance = BigInt(rawAllow || 0n);
             if (currentAllowance < amountToPay) {
               setTxState((prev) => ({
                 ...prev,
@@ -1318,60 +1427,90 @@ export function useWeb3() {
 
           let lastReceipt: any = null;
           for (let rStep = startStepRank; rStep <= Number(targetRank); rStep++) {
-            let upgradeTx: any = null;
-            const defaultHighGas = rStep >= 20 ? 15000000n : 8000000n;
+            // หากอัปเกรดหลายขั้นต่อเนื่อง รอให้ RPC โหนดซิงค์บล็อกของขั้นก่อนหน้าให้ตรงกันก่อนเพื่อป้องกัน ErrStepByStep
+            if (rStep > startStepRank) {
+              for (let retry = 0; retry < 6; retry++) {
+                try {
+                  const chkRank = Number(await matrixContract.getMainIdCurrentRank(BigInt(mIdNum)));
+                  if (chkRank >= rStep - 1) break;
+                } catch {
+                  // ignore
+                }
+                await new Promise((r) => setTimeout(r, 600));
+              }
+            }
 
-            if (mIdNum > 0 && typeof matrixContract.upgradeRankForMainId === 'function') {
-              await matrixContract.upgradeRankForMainId.staticCall(BigInt(mIdNum), Number(rStep), {
-                gasLimit: 15000000n,
-              });
-              let gasLimitToUse = defaultHighGas;
+            let upgradeTx: any = null;
+            const stepNom = RANK_PRICES_USDT[rStep - 1] || 10;
+            const stepPriceBn = ethers.parseUnits(stepNom.toString(), usdtDecimals);
+
+            let prepData: Awaited<ReturnType<typeof prepareUpgradePlacementAndPayouts>> | null = null;
+            let canUseWithPayouts = false;
+
+            if (mIdNum > 0 && typeof matrixContract.upgradeRankWithPayouts === 'function') {
               try {
-                const estGas = await matrixContract.upgradeRankForMainId.estimateGas(
+                prepData = await prepareUpgradePlacementAndPayouts(
+                  signer,
+                  currentContract,
+                  mIdNum,
+                  rStep,
+                  userAddr,
+                  stepPriceBn
+                );
+                await matrixContract.upgradeRankWithPayouts.staticCall(
                   BigInt(mIdNum),
                   Number(rStep),
-                  { gasLimit: 15000000n }
+                  prepData.targetParentId,
+                  prepData.isLeft,
+                  prepData.payouts.recipients,
+                  prepData.payouts.amounts,
+                  prepData.payouts.vaultTargetNodeId,
+                  prepData.payouts.vaultAmount,
+                  { gasLimit: 1500000n }
                 );
-                const buffered = (estGas * 125n) / 100n;
-                gasLimitToUse = buffered > defaultHighGas ? buffered : defaultHighGas;
-                if (gasLimitToUse > 15000000n) gasLimitToUse = 15000000n;
+                canUseWithPayouts = true;
               } catch {
-                gasLimitToUse = defaultHighGas;
+                canUseWithPayouts = false;
               }
+            }
+
+            if (canUseWithPayouts && prepData) {
+              setTxState((prev) => ({
+                ...prev,
+                step: `กำลังส่งคำสั่งอัปเกรดแรงค์ ${rStep}${Number(targetRank) > startStepRank ? `/${targetRank}` : ''} สำหรับรหัสหลัก #${mIdNum} พร้อมกระเป๋าผู้รับค่าคอมมิชชัน (${prepData!.payouts.recipients.length} กระเป๋า)... กรุณายืนยันใน MetaMask`,
+              }));
+              upgradeTx = await matrixContract.upgradeRankWithPayouts(
+                BigInt(mIdNum),
+                Number(rStep),
+                prepData.targetParentId,
+                prepData.isLeft,
+                prepData.payouts.recipients,
+                prepData.payouts.amounts,
+                prepData.payouts.vaultTargetNodeId,
+                prepData.payouts.vaultAmount,
+                { gasLimit: 1200000n }
+              );
+            } else if (mIdNum > 0 && typeof matrixContract.upgradeRankForMainId === 'function') {
               setTxState((prev) => ({
                 ...prev,
                 step: `กำลังส่งคำสั่งอัปเกรดแรงค์ ${rStep}${Number(targetRank) > startStepRank ? `/${targetRank}` : ''} สำหรับรหัสหลัก #${mIdNum}... กรุณายืนยันใน MetaMask`,
               }));
               upgradeTx = await matrixContract.upgradeRankForMainId(BigInt(mIdNum), Number(rStep), {
-                gasLimit: gasLimitToUse,
+                gasLimit: 2500000n,
               });
             } else {
-              await matrixContract.upgradeRank.staticCall(Number(rStep), {
-                gasLimit: 15000000n,
-              });
-              let gasLimitToUse = defaultHighGas;
-              try {
-                const estGas = await matrixContract.upgradeRank.estimateGas(Number(rStep), {
-                  gasLimit: 15000000n,
-                });
-                const buffered = (estGas * 125n) / 100n;
-                gasLimitToUse = buffered > defaultHighGas ? buffered : defaultHighGas;
-                if (gasLimitToUse > 15000000n) gasLimitToUse = 15000000n;
-              } catch {
-                gasLimitToUse = defaultHighGas;
-              }
               setTxState((prev) => ({
                 ...prev,
                 step: `กำลังส่งคำสั่งอัปเกรดแรงค์ ${rStep}... กรุณายืนยันใน MetaMask`,
               }));
               upgradeTx = await matrixContract.upgradeRank(Number(rStep), {
-                gasLimit: gasLimitToUse,
+                gasLimit: 2500000n,
               });
             }
 
             setTxState((prev) => ({
               ...prev,
-              step: `ส่งคำสั่งอัปเกรดแรงค์ ${rStep} แล้ว กำลังรอการตรวจสอบบนบล็อกเชน (จำกัดเวลา 2.5 นาที)...`,
+              step: `ส่งคำสั่งอัปเกรดแรงค์ ${rStep} แล้ว กำลังรอการยืนยันบนบล็อกเชน...`,
               txHash: upgradeTx.hash,
             }));
 
@@ -1379,6 +1518,7 @@ export function useWeb3() {
             lastReceipt = await waitTxWithTimeout(upgradeTx, RANK_UPGRADE_TIMEOUT_MS, upgradeTimeoutMsg);
           }
 
+          // ปลดล็อกปุ่มและแสดงสถานะสำเร็จทันทีที่บล็อกเชนยืนยันเสร็จ ไม่ต้องรอซิงค์ 27 แรงค์
           setTxState({
             isLoading: false,
             step: 'สำเร็จ!',
@@ -1387,11 +1527,31 @@ export function useWeb3() {
             successMessage: `🚀 อัปเกรด${mIdNum > 0 ? `รหัสหลัก #${mIdNum} ` : ''}สู่แรงค์ ${targetRank} (${nominalPrice} USDT) บนบล็อกเชนสำเร็จเรียบร้อย!`,
           });
 
-          await fetch('/api/db/sync', { method: 'POST' }).catch(() => {});
-          await refreshUserData(userAddr);
+          // อัปเดตสถานะใน Database ทันทีเพื่อให้ UI แสดงแรงค์ใหม่และกดขั้นถัดไปได้เลย
+          await fetch('/api/matrix/upgrade', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              targetRank,
+              mainId: mIdNum,
+              owner: userAddr,
+            }),
+          }).catch(() => {});
+
           if (typeof window !== 'undefined') {
             window.dispatchEvent(new CustomEvent('matrix:tree:refresh'));
           }
+
+          // ซิงค์ข้อมูลบล็อกเชนและโปรไฟล์ในพื้นหลังโดยไม่บล็อกปุ่มกดของผู้ใช้
+          fetch('/api/db/sync', { method: 'POST' })
+            .then(() => refreshUserData(userAddr))
+            .then(() => {
+              if (typeof window !== 'undefined') {
+                window.dispatchEvent(new CustomEvent('matrix:tree:refresh'));
+              }
+            })
+            .catch(() => {});
+
           return lastReceipt;
         } catch (onChainErr: any) {
           const rawErrMsg = String(
@@ -1405,6 +1565,10 @@ export function useWeb3() {
 
           if (isUserRejected) {
             throw new Error('ยกเลิกการทำรายการในกระเป๋า Web3 (User Rejected)');
+          }
+
+          if (rawErrMsg.includes('ไม่เพียงพอ')) {
+            throw onChainErr;
           }
 
           // หากเกินเวลา 2.5 นาที (Timeout) ให้ตัดจบเป็น "ไม่สำเร็จทันที" ห้าม fallback หรือปล่อยค้าง
@@ -1424,6 +1588,17 @@ export function useWeb3() {
             rawErrMsg
           );
         }
+      }
+
+      if (targetRank <= dbCurrentRank) {
+        setTxState({
+          isLoading: false,
+          step: '',
+          txHash: null,
+          error: `รหัสหลัก #${mIdNum} อยู่ใน Rank ${dbCurrentRank} เรียบร้อยแล้ว (ไม่สามารถกดย้อนหลังสู่ Rank ${targetRank} ได้)`,
+          successMessage: null,
+        });
+        return;
       }
 
       // Option B: Database / Per-Main-ID Upgrade Engine
@@ -1469,7 +1644,7 @@ export function useWeb3() {
           `🚀 อัปเกรดรหัสหลัก #${mIdNum} สู่แรงค์ ${targetRank} (${nominalPrice} USDT) สำเร็จเรียบร้อย!`,
       });
 
-      await refreshUserData(mainIdOwner || userAddr || account || '0x622E20082e63c7220c5AF0A77Cbc437a98505311');
+      refreshUserData(mainIdOwner || userAddr || account || '0x622E20082e63c7220c5AF0A77Cbc437a98505311').catch(() => {});
       if (typeof window !== 'undefined') {
         window.dispatchEvent(new CustomEvent('matrix:tree:refresh'));
       }

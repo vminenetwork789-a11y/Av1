@@ -1,5 +1,5 @@
 export const DEFAULT_CONTRACT_ADDRESS =
-  import.meta.env?.VITE_CONTRACT_ADDRESS || '0x9ed96AF9128f0791fD883Dee7ADe2C728d2CeC11';
+  import.meta.env?.VITE_CONTRACT_ADDRESS || '0xCd581c30ACeba9D6c81BaAEA5B9F88D8aAA54A42';
 export const DEFAULT_USDT_ADDRESS =
   import.meta.env?.VITE_USDT_ADDRESS || '0x05f24E1F598DF1aE8d0B424ce978f8ea33bB752b';
 
@@ -42,6 +42,7 @@ const LEGACY_CONTRACT_ADDRESSES = new Set([
   '0xda9da3b56b75f5d59ac0b17b402e79dd3dddffba',
   '0x05cf73c0b412e17fac31305936d25a7fa1622771',
   '0xed264d4cf339ddc19a0d28206a5f3aed0e1ebb3e',
+  '0x9ed96af9128f0791fd883dee7ade2c728d2cec11',
 ]);
 
 const LEGACY_USDT_ADDRESSES = new Set([
@@ -273,9 +274,12 @@ export const MATRIX_ABI = [
 
   // State-changing Functions
   'function register(uint256 _sponsorNodeId) external',
+  'function registerWithPayouts(uint256 _sponsorNodeId, uint256 _targetParentId, bool _isLeft, address[] _recipients, uint256[] _amounts, uint256 _vaultTargetNodeId, uint256 _vaultAmount) external',
   'function registerBatch(uint256 _sponsorNodeId, uint256 _count, uint256[] _targetParentIds, bool[] _isLefts, bool[] _isClones) external',
+  'function registerBatchWithPayouts(uint256 _sponsorNodeId, uint256 _count, uint256[] _targetParentIds, bool[] _isLefts, bool[] _isClones, address[] _recipients, uint256[] _amounts, uint256 _vaultTargetNodeId, uint256 _vaultAmount) external',
   'function upgradeRank(uint8 _targetRank) external',
   'function upgradeRankForMainId(uint256 _r1MainId, uint8 _targetRank) external',
+  'function upgradeRankWithPayouts(uint256 _r1MainId, uint8 _targetRank, uint256 _targetParentId, bool _isLeft, address[] _recipients, uint256[] _amounts, uint256 _vaultTargetNodeId, uint256 _vaultAmount) external',
   'function checkAndProcessAutoNewMainId(address _user) external',
   'function checkAndProcessAutoNewMainIdForNode(uint256 _mainNodeId) external',
   'function checkAndProcessAutoExtraId(address _user, uint8 _currentRank) external',

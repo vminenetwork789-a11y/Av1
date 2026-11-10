@@ -1065,10 +1065,327 @@ export async function previewOffChainSimulation(
     onChainNodesList,
     sponsorNodeDetail,
     sponsorOwnedNodes,
+    simulatedRankNodes: rankNodes,
   };
 }
 
-// --- 6. ฟังก์ชันหลักสำหรับคำนวณตำแหน่งออโต้และส่งธุรกรรมลง Smart Contract ---
+export interface FrontendPayoutPayload {
+  recipients: string[];
+  amounts: bigint[];
+  vaultTargetNodeId: bigint;
+  vaultAmount: bigint;
+}
+
+/**
+ * คำนวณกระเป๋าผู้รับค่าคอมมิชชันและยอดสะสม Upgrade Vault จากหน้าบ้าน (Off-Chain Payout Calculator)
+ * ตามกฎเดิม 100%:
+ * - 30% Direct Referral Bonus -> ผู้แนะนำตรง (directSponsor)
+ * - 30% Unilevel (2% x 15 ชั้น) -> ไล่ตามสาย parentId ขึ้นไป 15 ชั้น (ชั้นที่เหลือเข้า Family Pool)
+ * - 35% Upgrade Vault -> สะสมเข้าโหนดแม่ (parentId) ของโหนดที่ลงฝั่งซ้าย
+ * - 4% AllSell Fee -> กระเป๋า AllSell
+ * - 1% Bot Fee -> กระเป๋า Bot
+ * รวมซ้ำกระเป๋าเดียวกัน (Deduplicate & Aggregate) เพื่อลดจำนวนครั้งในการโอนเหรียญประหยัด Gas สูงสุด
+ */
+export async function calculateFrontendPayoutPayload(
+  providerOrSigner: ethers.Provider | ethers.Signer | null,
+  contractAddress: string,
+  rank: number,
+  rankPriceWei: bigint,
+  rankNodes: RankNodesMap,
+  stepLogs: SimulationStepLog[],
+  defaultSponsorAddress: string
+): Promise<FrontendPayoutPayload> {
+  const provider = await getWorkingReadProvider(providerOrSigner);
+  const contract = new ethers.Contract(contractAddress, CONTRACT_ABI, provider);
+
+  let allSellWallet = '0xbeFedBb942A73957f6123bA0B3Aa27B4a081F710';
+  let botWallet = '0xbeFeb9871a20656aEF7E8d218F751E9c23fAf710';
+  let familyPool = '0x622E20082e63c7220c5AF0A77Cbc437a98505311';
+
+  try {
+    const [asW, bW, fpW] = await Promise.all([
+      contract.allSellWallet().catch(() => allSellWallet),
+      contract.botWallet().catch(() => botWallet),
+      contract.familyPool().catch(() => familyPool),
+    ]);
+    if (asW && asW !== ethers.ZeroAddress) allSellWallet = String(asW);
+    if (bW && bW !== ethers.ZeroAddress) botWallet = String(bW);
+    if (fpW && fpW !== ethers.ZeroAddress) familyPool = String(fpW);
+  } catch {
+    // Use fallback system wallets
+  }
+
+  const recipientTotals = new Map<string, bigint>();
+  const addTransfer = (addr: string, amount: bigint) => {
+    if (amount <= 0n) return;
+    const validAddr =
+      addr && addr !== ethers.ZeroAddress && ethers.isAddress(addr) ? ethers.getAddress(addr) : ethers.getAddress(familyPool);
+    recipientTotals.set(validAddr, (recipientTotals.get(validAddr) || 0n) + amount);
+  };
+
+  let vaultTargetNodeId = 1n;
+  let totalVaultAmount = 0n;
+
+  const directBonusPerNode = (rankPriceWei * 30n) / 100n;
+  const allSellFeePerNode = (rankPriceWei * 4n) / 100n;
+  const botFeePerNode = (rankPriceWei * 1n) / 100n;
+  const vaultAllocPerNode = (rankPriceWei * 35n) / 100n;
+  const levelRatePerNode = (rankPriceWei * 2n) / 100n;
+
+  for (const step of stepLogs) {
+    // หากลงฝั่งซ้าย โหนดนั้นจ่ายคอมมิชชันทันที; หากลงฝั่งขวา โคลนสุดท้ายใน cascade ที่ลงฝั่งซ้ายจะเป็นตัวจ่ายคอมมิชชัน
+    let effectiveNodeIdStr = step.assignedNodeId;
+    let effectiveParentIdStr = step.targetParentId;
+
+    if (!step.isLeft && step.spawnedClones && step.spawnedClones.length > 0) {
+      const leftClone = [...step.spawnedClones].reverse().find((c) => c.cloneIsLeft) || step.spawnedClones[step.spawnedClones.length - 1];
+      effectiveNodeIdStr = leftClone.cloneNodeId;
+      effectiveParentIdStr = leftClone.cloneParentId;
+    }
+
+    const effectiveNode = rankNodes[effectiveNodeIdStr];
+    const directSponsorAddr =
+      effectiveNode?.directSponsor && effectiveNode.directSponsor !== ethers.ZeroAddress
+        ? effectiveNode.directSponsor
+        : defaultSponsorAddress || familyPool;
+
+    // 1. 30% Direct Referral Bonus
+    addTransfer(directSponsorAddr, directBonusPerNode);
+
+    // 2. 4% AllSell & 1% Bot
+    addTransfer(allSellWallet, allSellFeePerNode);
+    addTransfer(botWallet, botFeePerNode);
+
+    // 3. 35% Upgrade Vault (สะสมให้โหนดแม่ของโหนดที่ลงซ้าย)
+    const pIdBn = BigInt(effectiveParentIdStr || '1');
+    if (pIdBn > 0n) {
+      vaultTargetNodeId = pIdBn;
+    }
+    totalVaultAmount += vaultAllocPerNode;
+
+    // 4. 30% Level Bonus (2% x 15 ชั้น)
+    let currIdStr = effectiveParentIdStr;
+    let paidLevels = 0n;
+    const visited = new Set<string>();
+
+    for (let lvl = 1; lvl <= 15; lvl++) {
+      if (!currIdStr || currIdStr === '0' || visited.has(currIdStr)) break;
+      visited.add(currIdStr);
+      const ancNode = rankNodes[currIdStr];
+      if (!ancNode) break;
+      if (ancNode.owner && ancNode.owner !== ethers.ZeroAddress) {
+        addTransfer(ancNode.owner, levelRatePerNode);
+        paidLevels += 1n;
+      }
+      currIdStr = ancNode.parentId ? ancNode.parentId.toString() : '0';
+    }
+
+    if (paidLevels < 15n) {
+      const unpaidAmount = (15n - paidLevels) * levelRatePerNode;
+      addTransfer(familyPool, unpaidAmount);
+    }
+  }
+
+  const recipients: string[] = [];
+  const amounts: bigint[] = [];
+  for (const [addr, amt] of recipientTotals.entries()) {
+    if (amt > 0n) {
+      recipients.push(addr);
+      amounts.push(amt);
+    }
+  }
+
+  return {
+    recipients,
+    amounts,
+    vaultTargetNodeId,
+    vaultAmount: totalVaultAmount,
+  };
+}
+
+/**
+ * คำนวณตำแหน่งวางและกระเป๋าผู้รับค่าคอมมิชชันสำหรับการอัปเกรดแรงค์ (Rank 2 - 27)
+ */
+export async function prepareUpgradePlacementAndPayouts(
+  providerOrSigner: ethers.Provider | ethers.Signer | null,
+  contractAddress: string,
+  r1MainId: number,
+  targetRank: number,
+  userAddress: string,
+  targetPriceWei: bigint
+): Promise<{
+  targetParentId: bigint;
+  isLeft: boolean;
+  payouts: FrontendPayoutPayload;
+}> {
+  const rankNodes: RankNodesMap = {};
+  let sponsorAddress = userAddress;
+  const provider = await getWorkingReadProvider(providerOrSigner);
+  const contract = new ethers.Contract(contractAddress, CONTRACT_ABI, provider);
+
+  let onChainTotal = 1;
+  try {
+    onChainTotal = Math.max(1, Number(await contract.totalNodesInRank(targetRank)));
+  } catch {
+    onChainTotal = 1;
+  }
+
+  try {
+    const treeRes = await fetch(`/api/matrix/tree-nodes?rank=${targetRank}&contract=${contractAddress}`, {
+      headers: { Accept: 'application/json' },
+    });
+    if (treeRes.ok) {
+      const treeJson = await treeRes.json();
+      if (treeJson?.success && Array.isArray(treeJson.nodes)) {
+        for (const n of treeJson.nodes) {
+          const idNum = Number(n.id || 0);
+          if (idNum <= 0 || idNum > onChainTotal || n.isLocalUpgrade || n.isSyntheticExtra) continue;
+          const idBn = BigInt(idNum);
+          const lChild = Number(n.leftChild || 0) <= onChainTotal ? BigInt(n.leftChild || 0) : 0n;
+          const rChild = Number(n.rightChild || 0) <= onChainTotal ? BigInt(n.rightChild || 0) : 0n;
+          rankNodes[idBn.toString()] = {
+            id: idBn,
+            owner: String(n.owner || ethers.ZeroAddress),
+            directSponsor: String(n.directSponsor || ethers.ZeroAddress),
+            parentId: BigInt(n.parentId || 0),
+            leftChild: lChild,
+            rightChild: rChild,
+            isClone: Boolean(n.isClone),
+          };
+        }
+      }
+    }
+  } catch {
+    // fallback below
+  }
+
+  // หากจำนวนโหนดใน DB ไม่ตรงกับบนเชน ให้ดึงโหนดจริงจากเชนโดยตรงเพื่อป้องกัน targetParentId คลาดเคลื่อน
+  if (Object.keys(rankNodes).length < onChainTotal && onChainTotal <= 30) {
+    try {
+      const ids = Array.from({ length: onChainTotal }, (_, idx) => idx + 1);
+      const rawNodes = await Promise.all(
+        ids.map(async (id) => {
+          try {
+            const n = await contract.rankNodes(targetRank, id);
+            return {
+              id: BigInt(n.id ?? n[0]),
+              owner: String(n.owner ?? n[1]),
+              directSponsor: String(n.directSponsor ?? n[2]),
+              parentId: BigInt(n.parentId ?? n[3]),
+              leftChild: BigInt(n.leftChild ?? n[4]),
+              rightChild: BigInt(n.rightChild ?? n[5]),
+              isClone: Boolean(n.isClone ?? n[6]),
+            };
+          } catch {
+            return null;
+          }
+        })
+      );
+      for (const item of rawNodes) {
+        if (item && item.id > 0n) {
+          rankNodes[item.id.toString()] = item;
+        }
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  if (Object.keys(rankNodes).length === 0) {
+    rankNodes['1'] = {
+      id: 1n,
+      owner: '0x622E20082e63c7220c5AF0A77Cbc437a98505311',
+      directSponsor: ethers.ZeroAddress,
+      parentId: 0n,
+      leftChild: 0n,
+      rightChild: 0n,
+      isClone: false,
+    };
+  }
+
+  // หาผู้แนะนำของ r1MainId จากผัง Rank 1
+  let sponsorTargetRankNodeId = 1n;
+  try {
+    const r1Res = await fetch(`/api/matrix/main-id/${r1MainId}`);
+    if (r1Res.ok) {
+      const r1Data = await r1Res.json();
+      if (r1Data?.directSponsor && r1Data.directSponsor !== ethers.ZeroAddress) {
+        sponsorAddress = String(r1Data.directSponsor);
+      }
+    }
+  } catch {
+    // ignore
+  }
+
+  // ค้นหาโหนดหลักของผู้แนะนำใน targetRank
+  const sponsorNodesInTarget = Object.values(rankNodes)
+    .filter((n) => !n.isClone && (n.owner || '').toLowerCase() === sponsorAddress.toLowerCase())
+    .sort((a, b) => Number(a.id - b.id));
+  if (sponsorNodesInTarget.length > 0) {
+    sponsorTargetRankNodeId = sponsorNodesInTarget[0].id;
+  }
+
+  const slot = findDirectSponsorOrCloneSlot(rankNodes, sponsorAddress, sponsorTargetRankNodeId);
+  const nextId = BigInt(onChainTotal + 1);
+  const newIdStr = nextId.toString();
+
+  rankNodes[newIdStr] = {
+    id: nextId,
+    owner: userAddress,
+    directSponsor: sponsorAddress,
+    parentId: slot.parentId,
+    leftChild: 0n,
+    rightChild: 0n,
+    isClone: false,
+  };
+
+  const spawnedClones: SpawnedCloneStep[] = [];
+  if (slot.isLeft) {
+    if (rankNodes[slot.parentId.toString()]) {
+      rankNodes[slot.parentId.toString()].leftChild = nextId;
+    }
+  } else {
+    if (rankNodes[slot.parentId.toString()]) {
+      rankNodes[slot.parentId.toString()].rightChild = nextId;
+    }
+    const ownerProfiles: Record<string, OwnerProfileCache> = {};
+    const simState = { nextNodeId: nextId, currentToggle: 0 };
+    simulateRightChildCloneCascade(rankNodes, ownerProfiles, slot.parentId, simState, spawnedClones, 0);
+  }
+
+  const stepLog: SimulationStepLog = {
+    applicantIndex: 1,
+    owner: userAddress,
+    assignedNodeId: newIdStr,
+    targetParentId: slot.parentId.toString(),
+    isLeft: slot.isLeft,
+    roundToggleUsed: 0,
+    spawnedClones,
+  };
+
+  const payouts = await calculateFrontendPayoutPayload(
+    providerOrSigner,
+    contractAddress,
+    targetRank,
+    targetPriceWei,
+    rankNodes,
+    [stepLog],
+    sponsorAddress
+  );
+
+  // ป้องกันกรณี vaultTargetNodeId เป็นโคลนที่เพิ่งเกิดใหม่ในธุรกรรมเดียวกัน ให้ชี้ไปที่โหนดแม่ที่มีอยู่จริงบนเชนเสมอ
+  if (payouts.vaultTargetNodeId > BigInt(onChainTotal)) {
+    payouts.vaultTargetNodeId = slot.parentId <= BigInt(onChainTotal) ? slot.parentId : 1n;
+  }
+
+  return {
+    targetParentId: slot.parentId <= BigInt(onChainTotal) ? slot.parentId : 1n,
+    isLeft: slot.isLeft,
+    payouts,
+  };
+}
+
+// --- 6. ฟังก์ชันหลักสำหรับคำนวณตำแหน่งออโต้ + กระเป๋าผู้รับค่าคอมมิชชัน และส่งธุรกรรมลง Smart Contract ---
 export async function executeOffChainSimulationAndBatch(
   signer: ethers.Signer,
   contractAddress: string,
@@ -1181,25 +1498,62 @@ export async function executeOffChainSimulationAndBatch(
           simResult.targetParentIdsBigInt = latestSim.targetParentIdsBigInt;
           simResult.isLefts = latestSim.isLefts;
           simResult.stepLogs = latestSim.stepLogs;
+          simResult.simulatedRankNodes = latestSim.simulatedRankNodes;
         }
       } catch (cpErr) {
         console.warn('Notice re-verifying placement before sending batch:', cpErr);
       }
     }
 
+    const payoutPayload = await calculateFrontendPayoutPayload(
+      signer,
+      contractAddress,
+      1,
+      rankPrice,
+      simResult.simulatedRankNodes || {},
+      simResult.stepLogs,
+      simResult.sponsorAddress
+    );
+
     const firstParent = simResult.targetParentIds[0];
     const firstSide = simResult.isLefts[0] ? 'LEFT ลูกซ้าย' : 'RIGHT ลูกขวา';
     onProgress(
-      `ขั้นตอนที่ 2/2: กำลังส่งธุรกรรมลงตำแหน่งออโต้ Parent #${firstParent} (${firstSide})... กรุณายืนยันใน MetaMask`
+      `ขั้นตอนที่ 2/2: กำลังส่งธุรกรรมลงตำแหน่งออโต้ Parent #${firstParent} (${firstSide}) พร้อมรายการกระเป๋าผู้รับค่าคอมมิชชัน (${payoutPayload.recipients.length} กระเป๋า)... กรุณายืนยันใน MetaMask`
     );
 
-    const tx = await contract.registerBatch(
-      BigInt(sponsorNodeId),
-      BigInt(count),
-      simResult.targetParentIdsBigInt,
-      simResult.isLefts,
-      simResult.isClones
-    );
+    let tx;
+    try {
+      await contract.registerBatchWithPayouts.staticCall(
+        BigInt(sponsorNodeId),
+        BigInt(count),
+        simResult.targetParentIdsBigInt,
+        simResult.isLefts,
+        simResult.isClones,
+        payoutPayload.recipients,
+        payoutPayload.amounts,
+        payoutPayload.vaultTargetNodeId,
+        payoutPayload.vaultAmount
+      );
+      tx = await contract.registerBatchWithPayouts(
+        BigInt(sponsorNodeId),
+        BigInt(count),
+        simResult.targetParentIdsBigInt,
+        simResult.isLefts,
+        simResult.isClones,
+        payoutPayload.recipients,
+        payoutPayload.amounts,
+        payoutPayload.vaultTargetNodeId,
+        payoutPayload.vaultAmount
+      );
+    } catch {
+      tx = await contract.registerBatch(
+        BigInt(sponsorNodeId),
+        BigInt(count),
+        simResult.targetParentIdsBigInt,
+        simResult.isLefts,
+        simResult.isClones
+      );
+    }
 
     onProgress('ส่งธุรกรรมสำเร็จ กำลังรอการยืนยันจากบล็อกเชน BNB Testnet...');
     const receipt = await tx.wait();
@@ -1220,3 +1574,4 @@ export async function executeOffChainSimulationAndBatch(
     };
   }
 }
+

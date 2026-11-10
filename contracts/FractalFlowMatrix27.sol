@@ -1,20 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-/**
- * @title FractalFlowMatrix27 (EIP-170 Highly Optimized < 20 KB)
- * @notice Fully compliant with EVM EIP-170 24,576 bytes deployed bytecode limit.
- * - 27 Ranks (5 to 10,000 USDT)
- * - 15 Levels Binary Matrix (2:1 spillover rewards)
- * - 5-Rank Sliding Window Vault
- * - Direct Sponsor Left/Right Auto Placement & 2-Round Clone toggle
- * - Auto New Main ID (Rank 1-3 pools)
- * - Auto Extra ID (Rank 4+ pools, prioritized under direct sponsor & sponsor's clones)
- */
-
 interface IERC20 {
-    event Transfer(address indexed from, address indexed to, uint256 value);
-    event Approval(address indexed owner, address indexed spender, uint256 value);
     function totalSupply() external view returns (uint256);
     function balanceOf(address account) external view returns (uint256);
     function transfer(address to, uint256 value) external returns (bool);
@@ -24,24 +11,25 @@ interface IERC20 {
 }
 
 library SafeERC20 {
+    error SafeERC20FailedOperation(address token);
+
     function safeTransfer(IERC20 token, address to, uint256 value) internal {
-        (bool s, bytes memory d) = address(token).call(abi.encodeWithSelector(token.transfer.selector, to, value));
-        require(s && (d.length == 0 || abi.decode(d, (bool))), "TF");
+        _callOptionalReturn(token, abi.encodeCall(token.transfer, (to, value)));
     }
 
     function safeTransferFrom(IERC20 token, address from, address to, uint256 value) internal {
-        (bool s, bytes memory d) = address(token).call(abi.encodeWithSelector(token.transferFrom.selector, from, to, value));
-        require(s && (d.length == 0 || abi.decode(d, (bool))), "TFF");
+        _callOptionalReturn(token, abi.encodeCall(token.transferFrom, (from, to, value)));
+    }
+
+    function _callOptionalReturn(IERC20 token, bytes memory data) private {
+        (bool success, bytes memory returndata) = address(token).call(data);
+        if (!success || (returndata.length != 0 && !abi.decode(returndata, (bool)))) {
+            revert SafeERC20FailedOperation(address(token));
+        }
     }
 }
 
-abstract contract Context {
-    function _msgSender() internal view virtual returns (address) {
-        return msg.sender;
-    }
-}
-
-abstract contract Ownable is Context {
+abstract contract Ownable {
     address private _owner;
 
     error OwnableUnauthorizedAccount(address account);
@@ -55,16 +43,12 @@ abstract contract Ownable is Context {
     }
 
     modifier onlyOwner() {
-        _checkOwner();
+        if (owner() != msg.sender) revert OwnableUnauthorizedAccount(msg.sender);
         _;
     }
 
     function owner() public view virtual returns (address) {
         return _owner;
-    }
-
-    function _checkOwner() internal view virtual {
-        if (owner() != _msgSender()) revert OwnableUnauthorizedAccount(_msgSender());
     }
 
     function renounceOwnership() public virtual onlyOwner {
@@ -133,6 +117,7 @@ contract FractalFlowMatrix27 is Ownable, ReentrancyGuard {
     mapping(uint8 => mapping(uint256 => MatrixNode)) public rankNodes;
     mapping(uint8 => uint256) public totalNodesInRank;
     mapping(uint8 => mapping(uint256 => uint8)) public sponsorRoundToggle;
+    mapping(uint8 => uint8) public placementRoundToggle;
     mapping(uint8 => mapping(uint256 => uint256)) public nodeOriginMainId;
     mapping(uint8 => mapping(uint256 => uint256)) public nodeDirectSponsorNodeId;
     mapping(uint8 => mapping(uint256 => uint256)) public mainNodeLatestCloneId;
@@ -157,7 +142,6 @@ contract FractalFlowMatrix27 is Ownable, ReentrancyGuard {
     PendingCloneItem[] public pendingCloneQueue;
     uint256 public cloneQueueHead;
 
-    // Custom errors for bytecode compression
     error ErrInvalidSponsor();
     error ErrNotOwner();
     error ErrInvalidRank();
@@ -215,8 +199,9 @@ contract FractalFlowMatrix27 is Ownable, ReentrancyGuard {
             2000, 3000, 4000, 5000, 6000, 8000, 10000
         ];
 
-        for (uint8 i = 0; i < MAX_RANK; i++) {
+        for (uint8 i = 0; i < MAX_RANK;) {
             rankPrice[i + 1] = uint256(prices[i]) * unit;
+            unchecked { ++i; }
         }
 
         users[_rootUser].isRegistered = true;
@@ -224,7 +209,7 @@ contract FractalFlowMatrix27 is Ownable, ReentrancyGuard {
         mainIdCurrentMaxRank[1] = MAX_RANK;
         mainIdNextExtraRank[1] = 2;
 
-        for (uint8 r = 1; r <= MAX_RANK; r++) {
+        for (uint8 r = 1; r <= MAX_RANK;) {
             totalNodesInRank[r] = 1;
             rankNodes[r][1] = MatrixNode({
                 id: 1,
@@ -244,6 +229,7 @@ contract FractalFlowMatrix27 is Ownable, ReentrancyGuard {
             nodeToR1MainId[r][1] = 1;
 
             emit NodeCreated(r, 1, _rootUser, address(0), 0, true, false, false);
+            unchecked { ++r; }
         }
     }
 
@@ -272,7 +258,7 @@ contract FractalFlowMatrix27 is Ownable, ReentrancyGuard {
     {
         uint256 sponsorNodeId = users[_sponsor].firstNodeId[_rank];
         activeRound = sponsorNodeId > 0 ? sponsorRoundToggle[_rank][sponsorNodeId] : 0;
-        (targetParentId, isLeft) = _findPlacementWithRound(_rank, _sponsor, sponsorNodeId, activeRound);
+        (targetParentId, isLeft) = _findPlacementSpot(_rank, _sponsor, sponsorNodeId);
     }
 
     function previewPlacement(uint8 _rank, uint256 _sponsorNodeId)
@@ -308,28 +294,16 @@ contract FractalFlowMatrix27 is Ownable, ReentrancyGuard {
             return _rank == 1 ? 0 : mainIdNodeInRank[_r1MainId][_rank];
         }
         if (_rank == 1) return _r1MainId;
-        uint256 mapped = mainIdNodeInRank[_r1MainId][_rank];
-        if (mapped > 0) return mapped;
-        address nodeOwner = rankNodes[1][_r1MainId].owner;
-        if (nodeOwner != address(0) && users[nodeOwner].firstNodeId[1] == _r1MainId) {
-            uint256 firstInRank = users[nodeOwner].firstNodeId[_rank];
-            if (firstInRank > 0) {
-                uint256 boundR1 = nodeToR1MainId[_rank][firstInRank];
-                uint256 boundOrig = nodeOriginMainId[_rank][firstInRank];
-                if ((boundR1 == 0 || boundR1 == _r1MainId) && (boundOrig == 0 || boundOrig == _r1MainId || boundOrig == firstInRank)) {
-                    return firstInRank;
-                }
-            }
-        }
-        return 0;
+        return mainIdNodeInRank[_r1MainId][_rank];
     }
 
     function getAccumulatedVaultForMainId(uint256 _r1MainId) public view returns (uint256 totalVault) {
         uint8 currentRank = getMainIdCurrentRank(_r1MainId);
         (uint8 startRank, uint8 endRank) = getFiveRankWindow(currentRank);
-        for (uint8 r = startRank; r <= endRank; r++) {
+        for (uint8 r = startRank; r <= endRank;) {
             uint256 nId = getMainIdNodeInRank(_r1MainId, r);
             if (nId > 0) totalVault += nodeUpgradeVault[r][nId];
+            unchecked { ++r; }
         }
     }
 
@@ -338,25 +312,10 @@ contract FractalFlowMatrix27 is Ownable, ReentrancyGuard {
         if (r1MainId > 0) return getAccumulatedVaultForMainId(r1MainId);
         uint8 currentRank = _targetRank > 1 ? _targetRank - 1 : 1;
         (uint8 startRank, uint8 endRank) = getFiveRankWindow(currentRank);
-        for (uint8 r = startRank; r <= endRank && r < _targetRank; r++) {
+        for (uint8 r = startRank; r <= endRank && r < _targetRank;) {
             totalVault += users[_user].upgradeVault[r];
+            unchecked { ++r; }
         }
-    }
-
-    function _deductNodeVault(address _owner, uint8 _rank, uint256 _nodeId, uint256 _deduct) internal {
-        nodeUpgradeVault[_rank][_nodeId] -= _deduct;
-        if (_owner != address(0)) {
-            uint256 uBal = users[_owner].upgradeVault[_rank];
-            users[_owner].upgradeVault[_rank] = uBal <= _deduct ? 0 : uBal - _deduct;
-        }
-    }
-
-    function _clearVaultsForMainId(uint256 _r1MainId, uint8 _currentRank, uint256 _amountToDeduct) internal {
-        (uint8 startRank, uint8 endRank) = getFiveRankWindow(_currentRank);
-        address nodeOwner = _r1MainId >= 1_000_000
-            ? rankNodes[_currentRank][getMainIdNodeInRank(_r1MainId, _currentRank)].owner
-            : rankNodes[1][_r1MainId].owner;
-        _deductVaultRange(_r1MainId, nodeOwner, startRank, endRank, _amountToDeduct);
     }
 
     function _deductVaultRange(
@@ -365,17 +324,23 @@ contract FractalFlowMatrix27 is Ownable, ReentrancyGuard {
         uint8 _start,
         uint8 _end,
         uint256 _amount
-    ) internal returns (uint256 rem) {
-        rem = _amount;
-        for (uint8 r = _start; r <= _end && rem > 0; r++) {
+    ) internal {
+        uint256 rem = _amount;
+        for (uint8 r = _start; r <= _end && rem > 0;) {
             uint256 nId = getMainIdNodeInRank(_r1MainId, r);
-            if (nId == 0) continue;
-            uint256 bal = nodeUpgradeVault[r][nId];
-            if (bal > 0) {
-                uint256 deduct = bal <= rem ? bal : rem;
-                rem -= deduct;
-                _deductNodeVault(_owner, r, nId, deduct);
+            if (nId != 0) {
+                uint256 bal = nodeUpgradeVault[r][nId];
+                if (bal > 0) {
+                    uint256 deduct = bal <= rem ? bal : rem;
+                    rem -= deduct;
+                    nodeUpgradeVault[r][nId] = bal - deduct;
+                    if (_owner != address(0)) {
+                        uint256 uBal = users[_owner].upgradeVault[r];
+                        users[_owner].upgradeVault[r] = uBal <= deduct ? 0 : uBal - deduct;
+                    }
+                }
             }
+            unchecked { ++r; }
         }
     }
 
@@ -395,80 +360,38 @@ contract FractalFlowMatrix27 is Ownable, ReentrancyGuard {
         currentRank = getMainIdCurrentRank(targetMainId);
         (window5Start, window5End) = getFiveRankWindow(currentRank);
 
-        for (uint8 r = window5Start; r <= window5End; r++) {
+        for (uint8 r = window5Start; r <= window5End;) {
             uint256 nId = getMainIdNodeInRank(targetMainId, r);
             if (nId > 0) upgradeRankPool += nodeUpgradeVault[r][nId];
+            unchecked { ++r; }
         }
 
-        for (uint8 r = 1; r <= 3; r++) {
+        for (uint8 r = 1; r <= 3;) {
             if (r < window5Start) {
                 uint256 nId = getMainIdNodeInRank(targetMainId, r);
                 if (nId > 0) newAutoIdPool += nodeUpgradeVault[r][nId];
             }
+            unchecked { ++r; }
         }
 
-        newExtraIdPool = _calcExtraPool(targetMainId, currentRank, window5Start);
-    }
-
-    function _calcExtraPool(uint256 _r1MainId, uint8 _mainMaxRank, uint8 _window5Start) internal view returns (uint256 pool) {
-        pool = mainIdExtraPoolBonus[_r1MainId];
-        uint256 r4To27Pool = 0;
-        for (uint8 r = 4; r <= MAX_RANK; r++) {
-            if (_mainMaxRank == MAX_RANK || r < _window5Start) {
-                uint256 nId = getMainIdNodeInRank(_r1MainId, r);
-                if (nId > 0) r4To27Pool += nodeUpgradeVault[r][nId];
+        newExtraIdPool = mainIdExtraPoolBonus[targetMainId];
+        for (uint8 r = 4; r <= MAX_RANK;) {
+            if (currentRank == MAX_RANK || r < window5Start) {
+                uint256 nId = getMainIdNodeInRank(targetMainId, r);
+                if (nId > 0) newExtraIdPool += nodeUpgradeVault[r][nId];
             }
+            unchecked { ++r; }
         }
-        pool += r4To27Pool;
     }
 
-    function checkAndProcessAutoNewMainId(address _user) public {
-        uint256 r1MainId = users[_user].firstNodeId[1];
-        if (r1MainId > 0) checkAndProcessAutoNewMainIdForNode(r1MainId);
-    }
-
-    function checkAndProcessAutoExtraId(address _user, uint8 _currentRank) public {
-        if (_currentRank < 2 || _currentRank > MAX_RANK) return;
-        uint256 mainNodeId = users[_user].firstNodeId[_currentRank];
-        if (mainNodeId == 0) mainNodeId = users[_user].firstNodeId[1];
-        if (mainNodeId == 0) mainNodeId = 1;
-        checkAndProcessAutoExtraIdForNode(_user, _currentRank, mainNodeId);
-    }
-
-    function checkAndProcessAutoExtraIdForNode(address _user, uint8 _currentRank, uint256 _sponsorNodeId) public {
-        if (_currentRank < 2 || _currentRank > MAX_RANK) return;
-
-        uint256 r1MainId = 0;
-        if (_sponsorNodeId > 0 && _sponsorNodeId <= totalNodesInRank[1]) {
-            MatrixNode storage r1Cand = rankNodes[1][_sponsorNodeId];
-            if (r1Cand.owner == _user && !r1Cand.isClone && !r1Cand.isExtraId) {
-                r1MainId = _sponsorNodeId;
-            }
-        }
-        if (r1MainId == 0) {
-            uint256 originInR = nodeOriginMainId[_currentRank][_sponsorNodeId];
-            if (originInR == 0) originInR = _sponsorNodeId;
-            r1MainId = nodeToR1MainId[_currentRank][originInR];
-        }
-        if (r1MainId == 0) r1MainId = users[_user].firstNodeId[1];
-        if (r1MainId == 0) r1MainId = 1;
-
-        address nodeOwner = rankNodes[1][r1MainId].owner;
-        if (nodeOwner == address(0)) nodeOwner = _user;
-
-        uint8 mainMaxRank = getMainIdCurrentRank(r1MainId);
-        (uint8 window5Start, ) = getFiveRankWindow(mainMaxRank);
-
-        processPendingExtraIdQueue(r1MainId, 1);
+    function getNodeVault(uint8 _rank, uint256 _nodeId) external view returns (uint256) {
+        return nodeUpgradeVault[_rank][_nodeId];
     }
 
     function getPendingCloneCount() external view returns (uint256) {
         uint256 total = pendingCloneQueue.length;
         uint256 head = cloneQueueHead;
-        if (total <= head) return 0;
-        unchecked {
-            return total - head;
-        }
+        return total > head ? total - head : 0;
     }
 
     function processCloneQueue(uint256 _maxIterations) external nonReentrant {
@@ -476,123 +399,33 @@ contract FractalFlowMatrix27 is Ownable, ReentrancyGuard {
         uint256 head = cloneQueueHead;
         if (total <= head || _maxIterations == 0) return;
 
-        uint256 available;
-        unchecked {
-            available = total - head;
-        }
+        uint256 available = total - head;
         uint256 iterations = _maxIterations < available ? _maxIterations : available;
 
         for (uint256 i = 0; i < iterations;) {
-            uint256 idx;
-            unchecked {
-                idx = head + i;
-            }
-            // 1. ดึงข้อมูลตัวแปร Storage มาไว้ใน Memory เพื่อประหยัดแก๊ส (SLOAD ครั้งเดียว)
+            uint256 idx = head + i;
             PendingCloneItem memory item = pendingCloneQueue[idx];
-
             if (item.parentOwner != address(0)) {
-                _createAndPlaceCloneNode(
-                    item.rank,
-                    item.parentOwner,
-                    item.parentSponsor,
-                    item.cloneOriginMainId,
-                    item.targetSponsorNodeId,
-                    item.r1SponsorId
-                );
-                delete pendingCloneQueue[idx]; // Gas refund จากการลบ Storage
+                _spawnCloneNode(item.rank, item.parentOwner, item.parentSponsor, item.cloneOriginMainId, item.targetSponsorNodeId, true);
+                delete pendingCloneQueue[idx];
             }
-
-            // 2. ใช้ unchecked สำหรับตัวแปรนับรอบ (i) เพื่อประหยัด Gas ในการเช็ก Overflow
-            unchecked {
-                ++i;
-            }
+            unchecked { ++i; }
         }
 
-        unchecked {
-            head += iterations;
-        }
+        head += iterations;
         cloneQueueHead = head;
-
         if (head >= pendingCloneQueue.length) {
             delete pendingCloneQueue;
             cloneQueueHead = 0;
             emit CloneQueueProcessed(iterations, 0);
         } else {
-            unchecked {
-                emit CloneQueueProcessed(iterations, pendingCloneQueue.length - head);
-            }
+            emit CloneQueueProcessed(iterations, pendingCloneQueue.length - head);
         }
     }
 
-    function processPendingExtraIdQueue(uint256 _r1MainId, uint8 _maxBatch) public returns (uint8 processed) {
-        if (_r1MainId == 0 || _r1MainId > totalNodesInRank[1]) return 0;
-        address nodeOwner = rankNodes[1][_r1MainId].owner;
-        if (nodeOwner == address(0)) return 0;
-
-        uint8 mainMaxRank = getMainIdCurrentRank(_r1MainId);
-        (uint8 window5Start, ) = getFiveRankWindow(mainMaxRank);
-        uint8 limit = _maxBatch == 0 || _maxBatch > 2 ? 2 : _maxBatch;
-
-        for (uint8 pass = 0; pass < limit;) {
-            bool spawned = false;
-            for (uint8 targetRank = MAX_RANK; targetRank >= 2;) {
-                uint256 pool = _calcExtraPool(_r1MainId, mainMaxRank, window5Start);
-                uint256 price = rankPrice[targetRank];
-                if (price != 0 && pool >= price && getMainIdNodeInRank(_r1MainId, targetRank) != 0) {
-                    _deductExtraPool(_r1MainId, nodeOwner, price, mainMaxRank, window5Start);
-                    _spawnExtraNode(_r1MainId, nodeOwner, targetRank);
-                    spawned = true;
-                    unchecked {
-                        ++processed;
-                    }
-                    break;
-                }
-                unchecked {
-                    --targetRank;
-                }
-            }
-            if (!spawned) break;
-            unchecked {
-                ++pass;
-            }
-        }
-    }
-
-    function _deductExtraPool(
-        uint256 _r1MainId,
-        address _nodeOwner,
-        uint256 _targetPrice,
-        uint8 _mainMaxRank,
-        uint8 _window5Start
-    ) internal {
-        uint256 rem = _targetPrice;
-        // 1. หักจากยอดเก่าโบนัสเม็ดซ้ายของ Extra ID ก่อน
-        uint256 bonus = mainIdExtraPoolBonus[_r1MainId];
-        if (bonus > 0) {
-            uint256 bDeduct = bonus <= rem ? bonus : rem;
-            mainIdExtraPoolBonus[_r1MainId] -= bDeduct;
-            rem -= bDeduct;
-        }
-        // 2. หักจากยอดเก่าและยอดสะสมใน Rank 4..27 ที่พ้นกรอบ 5 rank ย้อนหลังตามลำดับเก่าไปใหม่
-        if (rem > 0) {
-            uint8 endR = _mainMaxRank == MAX_RANK ? MAX_RANK : (_window5Start > 4 ? _window5Start - 1 : 4);
-            _deductVaultRange(_r1MainId, _nodeOwner, 4, endR, rem);
-        }
-    }
-
-    function _spawnExtraNode(uint256 _r1MainId, address _nodeOwner, uint8 _targetRank) internal {
-        uint256 r1SponsorId = _r1MainId > 0 ? _r1MainId : 1;
-        address directSponsorAddr = _nodeOwner != address(0) ? _nodeOwner : rankNodes[1][r1SponsorId].owner;
-        uint256 sponsorNodeInTarget = getMainIdNodeInRank(r1SponsorId, _targetRank);
-
-        uint256 extraNodeId = _createAndPlaceAutoNode(_targetRank, _nodeOwner, directSponsorAddr, sponsorNodeInTarget, true);
-        nodeDirectSponsorNodeId[_targetRank][extraNodeId] = r1SponsorId;
-        emit AutoExtraIdCreated(_nodeOwner, _targetRank, extraNodeId);
-        mainIdNextExtraRank[_r1MainId] = _targetRank > 2 ? _targetRank - 1 : MAX_RANK;
-    }
-
-    function getNodeVault(uint8 _rank, uint256 _nodeId) external view returns (uint256) {
-        return nodeUpgradeVault[_rank][_nodeId];
+    function checkAndProcessAutoNewMainId(address _user) public {
+        uint256 r1MainId = users[_user].firstNodeId[1];
+        if (r1MainId > 0) checkAndProcessAutoNewMainIdForNode(r1MainId);
     }
 
     function checkAndProcessAutoNewMainIdForNode(uint256 _mainNodeId) public {
@@ -600,41 +433,57 @@ contract FractalFlowMatrix27 is Ownable, ReentrancyGuard {
         address nodeOwner = rankNodes[1][_mainNodeId].owner;
         if (nodeOwner == address(0)) revert ErrZero();
 
-        uint256 r1MainId = nodeOriginMainId[1][_mainNodeId];
-        if (r1MainId == 0) r1MainId = _mainNodeId;
-
-        uint8 currentRank = getMainIdCurrentRank(r1MainId);
-        (uint8 window5Start, ) = getFiveRankWindow(currentRank);
-
-        uint256 autoIdPool = 0;
-        for (uint8 r = 1; r <= 3;) {
-            if (r < window5Start) {
-                uint256 nId = getMainIdNodeInRank(r1MainId, r);
-                if (nId > 0) autoIdPool += nodeUpgradeVault[r][nId];
+        (, , , , uint256 autoIdPool, ) = getMainIdThreePools(nodeOwner, _mainNodeId);
+        uint256 r1Price = rankPrice[1];
+        if (r1Price > 0 && autoIdPool >= r1Price) {
+            uint256 count = autoIdPool / r1Price;
+            if (count > 2) count = 2;
+            uint256 totalDeduct = count * r1Price;
+            _deductVaultRange(_mainNodeId, nodeOwner, 1, 3, totalDeduct);
+            for (uint256 i = 0; i < count;) {
+                _insertNode(1, nodeOwner, nodeOwner, _mainNodeId, 0, true, false, false, true);
+                unchecked { ++i; }
             }
-            unchecked {
-                ++r;
-            }
+            emit AutoNewMainIdCreated(nodeOwner, count, totalDeduct);
         }
+    }
 
-        uint256 rank1Price = rankPrice[1];
-        if (rank1Price > 0 && autoIdPool >= rank1Price) {
-            uint256 count = autoIdPool / rank1Price;
-            if (count > 2) count = 2; // ป้องกัน Gas Limit เกิน โดยจำกัดออกรอบละไม่เกิน 2 รหัส ที่เหลือรอคิวถัดไป
-            if (count > 0) {
-                uint256 totalDeduct = count * rank1Price;
-                uint8 endR = window5Start > 3 ? 3 : (window5Start > 1 ? window5Start - 1 : 1);
-                _deductVaultRange(r1MainId, nodeOwner, 1, endR, totalDeduct);
+    function checkAndProcessAutoExtraId(address _user, uint8 _currentRank) public {
+        uint256 mainNodeId = users[_user].firstNodeId[1];
+        if (mainNodeId > 0) processPendingExtraIdQueue(mainNodeId, 1);
+    }
 
-                for (uint256 i = 0; i < count;) {
-                    _createAndPlaceAutoNode(1, nodeOwner, nodeOwner, r1MainId, false);
-                    unchecked {
-                        ++i;
-                    }
+    function checkAndProcessAutoExtraIdForNode(address, uint8, uint256 _sponsorNodeId) public {
+        if (_sponsorNodeId > 0) processPendingExtraIdQueue(_sponsorNodeId, 1);
+    }
+
+    function processPendingExtraIdQueue(uint256 _r1MainId, uint8 _maxBatch) public returns (uint8 processed) {
+        if (_r1MainId == 0 || _r1MainId > totalNodesInRank[1]) return 0;
+        address nodeOwner = rankNodes[1][_r1MainId].owner;
+        if (nodeOwner == address(0)) return 0;
+
+        (uint8 mainMaxRank, uint8 window5Start, , , , uint256 pool) = getMainIdThreePools(nodeOwner, _r1MainId);
+        uint8 limit = _maxBatch == 0 || _maxBatch > 2 ? 2 : _maxBatch;
+
+        for (uint8 pass = 0; pass < limit;) {
+            bool spawned = false;
+            for (uint8 targetRank = MAX_RANK; targetRank >= 2;) {
+                uint256 price = rankPrice[targetRank];
+                if (price != 0 && pool >= price && getMainIdNodeInRank(_r1MainId, targetRank) != 0) {
+                    uint8 endR = mainMaxRank == MAX_RANK ? MAX_RANK : (window5Start > 4 ? window5Start - 1 : 4);
+                    _deductVaultRange(_r1MainId, nodeOwner, 4, endR, price);
+                    pool -= price;
+                    uint256 spInTarget = getMainIdNodeInRank(_r1MainId, targetRank);
+                    uint256 extraId = _insertNode(targetRank, nodeOwner, nodeOwner, spInTarget, 0, true, false, true, true);
+                    emit AutoExtraIdCreated(nodeOwner, targetRank, extraId);
+                    spawned = true;
+                    unchecked { ++processed; }
+                    break;
                 }
-
-                emit AutoNewMainIdCreated(nodeOwner, count, totalDeduct);
+                unchecked { --targetRank; }
             }
+            if (!spawned) break;
+            unchecked { ++pass; }
         }
     }
 
@@ -647,6 +496,108 @@ contract FractalFlowMatrix27 is Ownable, ReentrancyGuard {
         }
     }
 
+    function _creditVault(uint8 _rank, uint256 _fromNodeId, uint256 _targetNodeId, uint256 _amount) internal {
+        uint256 vNodeId = _targetNodeId > 0 && _targetNodeId <= totalNodesInRank[_rank] ? _targetNodeId : 1;
+        address vOwner = rankNodes[_rank][vNodeId].owner;
+        if (vOwner != address(0)) {
+            users[vOwner].upgradeVault[_rank] += _amount;
+        }
+        nodeUpgradeVault[_rank][vNodeId] += _amount;
+        emit RewardDistributed(_fromNodeId, vNodeId, vOwner, _rank, "UPGRADE_VAULT", _amount);
+    }
+
+    /**
+     * @notice จ่ายค่าคอมมิชชันไปยังกระเป๋าผู้รับที่ระบบหน้าบ้านคำนวณส่งมาให้โดยตรง และบันทึกยอดสะสม Upgrade Vault
+     */
+    function _settleFrontendPayouts(
+        uint8 _rank,
+        uint256 _fromNodeId,
+        address[] calldata _recipients,
+        uint256[] calldata _amounts,
+        uint256 _vaultTargetNodeId,
+        uint256 _vaultAmount,
+        uint256 _maxBudget
+    ) internal {
+        uint256 len = _recipients.length;
+        if (len != _amounts.length) revert ErrBadParam();
+        uint256 used = _vaultAmount;
+        if (used > _maxBudget) revert ErrBadParam();
+
+        for (uint256 i = 0; i < len;) {
+            uint256 amt = _amounts[i];
+            address recip = _recipients[i];
+            if (amt > 0 && recip != address(0)) {
+                used += amt;
+                if (used > _maxBudget) revert ErrBadParam();
+                usdt.safeTransfer(recip, amt);
+                emit RewardDistributed(_fromNodeId, 0, recip, _rank, "COMMISSION", amt);
+            }
+            unchecked { ++i; }
+        }
+
+        if (_vaultAmount > 0) {
+            _creditVault(_rank, _fromNodeId, _vaultTargetNodeId, _vaultAmount);
+        }
+    }
+
+    /**
+     * @notice สมัครสมาชิก Rank 1 พร้อมรับรายการกระเป๋าผู้รับค่าคอมมิชชันจากหน้าบ้านโดยตรง
+     */
+    function registerWithPayouts(
+        uint256 _sponsorNodeId,
+        uint256 _targetParentId,
+        bool _isLeft,
+        address[] calldata _recipients,
+        uint256[] calldata _amounts,
+        uint256 _vaultTargetNodeId,
+        uint256 _vaultAmount
+    ) external nonReentrant {
+        (bool isValid, , address sponsorAddr) = checkValidSponsorId(_sponsorNodeId);
+        if (!isValid) revert ErrInvalidSponsor();
+
+        uint256 r1Price = rankPrice[1];
+        usdt.safeTransferFrom(msg.sender, address(this), r1Price);
+        _ensureRegistered(msg.sender, sponsorAddr, _sponsorNodeId);
+
+        bool hasPayouts = _recipients.length > 0 || _vaultAmount > 0;
+        uint256 newNodeId = _insertNode(1, msg.sender, sponsorAddr, _sponsorNodeId, _targetParentId, _isLeft, false, false, !hasPayouts);
+
+        if (hasPayouts) {
+            _settleFrontendPayouts(1, newNodeId, _recipients, _amounts, _vaultTargetNodeId, _vaultAmount, r1Price);
+        }
+
+        emit UserRegistered(msg.sender, sponsorAddr, _sponsorNodeId, newNodeId);
+    }
+
+    /**
+     * @notice สมัครสมาชิกแบบกลุ่ม (Batch) พร้อมรับรายการกระเป๋าผู้รับค่าคอมมิชชันจากหน้าบ้านโดยตรง
+     */
+    function registerBatchWithPayouts(
+        uint256 _sponsorNodeId,
+        uint256 _count,
+        uint256[] calldata _targetParentIds,
+        bool[] calldata _isLefts,
+        bool[] calldata _isClones,
+        address[] calldata _recipients,
+        uint256[] calldata _amounts,
+        uint256 _vaultTargetNodeId,
+        uint256 _vaultAmount
+    ) external nonReentrant {
+        bool hasPayouts = _recipients.length > 0 || _vaultAmount > 0;
+        (uint256 firstCreated, uint256 totalCost) = _executeBatchRegister(
+            _sponsorNodeId,
+            _count,
+            _targetParentIds,
+            _isLefts,
+            _isClones,
+            !hasPayouts
+        );
+
+        if (hasPayouts) {
+            _settleFrontendPayouts(1, firstCreated, _recipients, _amounts, _vaultTargetNodeId, _vaultAmount, totalCost);
+        }
+    }
+
     function registerBatch(
         uint256 _sponsorNodeId,
         uint256 _count,
@@ -654,61 +605,45 @@ contract FractalFlowMatrix27 is Ownable, ReentrancyGuard {
         bool[] calldata _isLefts,
         bool[] calldata _isClones
     ) external nonReentrant {
+        _executeBatchRegister(_sponsorNodeId, _count, _targetParentIds, _isLefts, _isClones, true);
+    }
+
+    function _executeBatchRegister(
+        uint256 _sponsorNodeId,
+        uint256 _count,
+        uint256[] calldata _targetParentIds,
+        bool[] calldata _isLefts,
+        bool[] calldata _isClones,
+        bool _payOnChainRewards
+    ) internal returns (uint256 firstCreated, uint256 totalCost) {
         if (_count == 0) revert ErrBadParam();
         (bool isValid, , address sponsorAddr) = checkValidSponsorId(_sponsorNodeId);
         if (!isValid) revert ErrInvalidSponsor();
 
-        uint256 r1Price = rankPrice[1];
-        uint256 totalCost = r1Price * _count;
+        totalCost = rankPrice[1] * _count;
         usdt.safeTransferFrom(msg.sender, address(this), totalCost);
         _ensureRegistered(msg.sender, sponsorAddr, _sponsorNodeId);
 
-        uint256 firstCreated = 0;
         bool hasTargets = _targetParentIds.length == _count && _isLefts.length == _count && _isClones.length == _count;
 
         for (uint256 i = 0; i < _count;) {
-            uint256 pId = hasTargets ? _targetParentIds[i] : 0;
-            bool isL = hasTargets ? _isLefts[i] : true;
-            bool isC = hasTargets ? _isClones[i] : false;
-
-            uint256 nId = _insertBatchItem(_sponsorNodeId, sponsorAddr, pId, isL, isC);
+            uint256 nId = _insertNode(
+                1,
+                msg.sender,
+                sponsorAddr,
+                _sponsorNodeId,
+                hasTargets ? _targetParentIds[i] : 0,
+                hasTargets ? _isLefts[i] : true,
+                hasTargets ? _isClones[i] : false,
+                false,
+                _payOnChainRewards
+            );
             if (firstCreated == 0) firstCreated = nId;
-            unchecked {
-                ++i;
-            }
+            unchecked { ++i; }
         }
 
         emit UserRegistered(msg.sender, sponsorAddr, _sponsorNodeId, firstCreated);
         emit BatchRegistered(msg.sender, _count, totalCost);
-    }
-
-    function _insertBatchItem(
-        uint256 _spNodeId,
-        address _spAddr,
-        uint256 _targetParentId,
-        bool _isLeft,
-        bool _isClone
-    ) internal returns (uint256 newNodeId) {
-        uint256 pId = _targetParentId;
-        bool isL = _isLeft;
-        if (pId == 0 || pId > totalNodesInRank[1] || (isL && rankNodes[1][pId].leftChild != 0) || (!isL && rankNodes[1][pId].rightChild != 0)) {
-            (pId, isL) = _findFirstAvailableUnder(1, _spNodeId);
-        }
-
-        newNodeId = _insertRawNode(1, msg.sender, _spAddr, pId, isL, _isClone, false);
-
-        if (!_isClone) {
-            nodeOriginMainId[1][newNodeId] = newNodeId;
-            nodeDirectSponsorNodeId[1][newNodeId] = _spNodeId;
-            mainIdCurrentMaxRank[newNodeId] = 1;
-            mainIdNodeInRank[newNodeId][1] = newNodeId;
-            nodeToR1MainId[1][newNodeId] = newNodeId;
-        }
-        if (isL) {
-            _distributeLeftChildRewards(1, newNodeId, pId, msg.sender);
-        } else {
-            _triggerRightChildClone(1, pId, false);
-        }
     }
 
     function register(uint256 _sponsorNodeId) external nonReentrant {
@@ -718,63 +653,11 @@ contract FractalFlowMatrix27 is Ownable, ReentrancyGuard {
         usdt.safeTransferFrom(msg.sender, address(this), rankPrice[1]);
         _ensureRegistered(msg.sender, sponsorAddr, _sponsorNodeId);
 
-        uint256 newMainNodeId = _placeStandardNode(1, msg.sender, sponsorAddr, _sponsorNodeId, true);
+        uint256 newMainNodeId = _insertNode(1, msg.sender, sponsorAddr, _sponsorNodeId, 0, true, false, false, true);
         emit UserRegistered(msg.sender, sponsorAddr, _sponsorNodeId, newMainNodeId);
     }
 
-    function _applyRankUpgrade(
-        uint256 _r1MainId,
-        address _user,
-        uint8 _targetRank,
-        bool _isAuto
-    ) internal returns (uint256 newNodeId) {
-        if (mainIdCurrentMaxRank[_r1MainId] < _targetRank) {
-            mainIdCurrentMaxRank[_r1MainId] = _targetRank;
-        }
-        if (users[_user].currentMaxRank < _targetRank) {
-            users[_user].currentMaxRank = _targetRank;
-        }
-
-        address sponsor = rankNodes[1][_r1MainId].directSponsor;
-        uint256 r1SponsorNodeId = nodeDirectSponsorNodeId[1][_r1MainId];
-        if (_r1MainId >= 1_000_000) {
-            uint256 currNodeId = getMainIdNodeInRank(_r1MainId, _targetRank - 1);
-            sponsor = rankNodes[_targetRank - 1][currNodeId].directSponsor;
-            r1SponsorNodeId = nodeDirectSponsorNodeId[_targetRank - 1][currNodeId];
-        } else if (r1SponsorNodeId == 0) {
-            r1SponsorNodeId = users[_user].sponsorMainNodeId;
-        }
-        if (r1SponsorNodeId == 0) r1SponsorNodeId = 1;
-        if (sponsor == address(0) && r1SponsorNodeId > 0 && rankNodes[1][r1SponsorNodeId].owner != address(0)) {
-            sponsor = rankNodes[1][r1SponsorNodeId].owner;
-        }
-        if (sponsor == address(0)) sponsor = users[_user].sponsor;
-        if (sponsor == address(0)) sponsor = rankNodes[_targetRank][1].owner;
-
-        uint256 sponsorInTarget = getMainIdNodeInRank(r1SponsorNodeId, _targetRank);
-        (uint256 parentId, bool isLeft) = _findPlacementSpot(_targetRank, sponsor, sponsorInTarget, false);
-        newNodeId = _insertRawNode(_targetRank, _user, sponsor, parentId, isLeft, false, false);
-
-        nodeOriginMainId[_targetRank][newNodeId] = _r1MainId;
-        nodeDirectSponsorNodeId[_targetRank][newNodeId] = r1SponsorNodeId;
-        mainIdNodeInRank[_r1MainId][_targetRank] = newNodeId;
-        nodeToR1MainId[_targetRank][newNodeId] = _r1MainId;
-
-        if (isLeft) {
-            _distributeLeftChildRewards(_targetRank, newNodeId, parentId, _user);
-        } else {
-            _triggerRightChildClone(_targetRank, parentId, false);
-        }
-
-        if (_r1MainId < 1_000_000) {
-            checkAndProcessAutoNewMainIdForNode(_r1MainId);
-        }
-        checkAndProcessAutoExtraIdForNode(_user, _targetRank, _r1MainId);
-
-        emit RankUpgraded(_user, _targetRank - 1, _targetRank, newNodeId, _isAuto);
-    }
-
-    function upgradeRankForMainId(uint256 _r1MainId, uint8 _targetRank) public nonReentrant {
+    function _collectUpgradePayment(uint256 _r1MainId, uint8 _targetRank) internal returns (uint256 targetPrice) {
         if (_r1MainId == 0 || _r1MainId > totalNodesInRank[1]) revert ErrBadParam();
         MatrixNode storage mNode = rankNodes[1][_r1MainId];
         if (mNode.owner != msg.sender) revert ErrNotOwner();
@@ -785,21 +668,44 @@ contract FractalFlowMatrix27 is Ownable, ReentrancyGuard {
         if (_targetRank != currentRank + 1) revert ErrStepByStep();
         if (getMainIdNodeInRank(_r1MainId, _targetRank) != 0) revert ErrRankActive();
 
-        uint256 targetPrice = rankPrice[_targetRank];
+        targetPrice = rankPrice[_targetRank];
         uint256 savedInVault = getAccumulatedVaultForMainId(_r1MainId);
+        (uint8 startRank, uint8 endRank) = getFiveRankWindow(currentRank);
 
         if (savedInVault >= targetPrice) {
-            _clearVaultsForMainId(_r1MainId, currentRank, targetPrice);
-            uint256 remainder = savedInVault - targetPrice;
-            if (remainder > 0) usdt.safeTransfer(msg.sender, remainder);
+            _deductVaultRange(_r1MainId, msg.sender, startRank, endRank, targetPrice);
         } else {
             if (savedInVault > 0) {
-                _clearVaultsForMainId(_r1MainId, currentRank, savedInVault);
+                _deductVaultRange(_r1MainId, msg.sender, startRank, endRank, savedInVault);
             }
             usdt.safeTransferFrom(msg.sender, address(this), targetPrice - savedInVault);
         }
+    }
 
-        _applyRankUpgrade(_r1MainId, msg.sender, _targetRank, false);
+    /**
+     * @notice อัปเกรด Rank พร้อมรับตำแหน่งวางและรายการกระเป๋าผู้รับค่าคอมมิชชันจากหน้าบ้านโดยตรง
+     */
+    function upgradeRankWithPayouts(
+        uint256 _r1MainId,
+        uint8 _targetRank,
+        uint256 _targetParentId,
+        bool _isLeft,
+        address[] calldata _recipients,
+        uint256[] calldata _amounts,
+        uint256 _vaultTargetNodeId,
+        uint256 _vaultAmount
+    ) external nonReentrant {
+        uint256 targetPrice = _collectUpgradePayment(_r1MainId, _targetRank);
+        bool hasPayouts = _recipients.length > 0 || _vaultAmount > 0;
+        uint256 newNodeId = _applyRankUpgrade(_r1MainId, msg.sender, _targetRank, false, _targetParentId, _isLeft, !hasPayouts);
+        if (hasPayouts) {
+            _settleFrontendPayouts(_targetRank, newNodeId, _recipients, _amounts, _vaultTargetNodeId, _vaultAmount, targetPrice);
+        }
+    }
+
+    function upgradeRankForMainId(uint256 _r1MainId, uint8 _targetRank) public nonReentrant {
+        _collectUpgradePayment(_r1MainId, _targetRank);
+        _applyRankUpgrade(_r1MainId, msg.sender, _targetRank, false, 0, true, true);
     }
 
     function upgradeRank(uint8 _targetRank) external {
@@ -818,8 +724,9 @@ contract FractalFlowMatrix27 is Ownable, ReentrancyGuard {
         uint8 currentRank = getMainIdCurrentRank(_r1MainId);
         if (_targetRank <= currentRank) revert ErrRankActive();
 
-        for (uint8 r = currentRank + 1; r <= _targetRank; r++) {
-            _applyRankUpgrade(_r1MainId, targetUser, r, false);
+        for (uint8 r = currentRank + 1; r <= _targetRank;) {
+            _applyRankUpgrade(_r1MainId, targetUser, r, false, 0, true, true);
+            unchecked { ++r; }
         }
     }
 
@@ -830,32 +737,74 @@ contract FractalFlowMatrix27 is Ownable, ReentrancyGuard {
         adminUpgradeRankForMainId(r1MainId, _targetRank);
     }
 
-    function _insertRawNode(
+    function _applyRankUpgrade(
+        uint256 _r1MainId,
+        address _user,
+        uint8 _targetRank,
+        bool _isAuto,
+        uint256 _overrideParentId,
+        bool _overrideIsLeft,
+        bool _payOnChainRewards
+    ) internal returns (uint256 newNodeId) {
+        if (mainIdCurrentMaxRank[_r1MainId] < _targetRank) {
+            mainIdCurrentMaxRank[_r1MainId] = _targetRank;
+        }
+        if (users[_user].currentMaxRank < _targetRank) {
+            users[_user].currentMaxRank = _targetRank;
+        }
+
+        uint256 r1SponsorNodeId = nodeDirectSponsorNodeId[1][_r1MainId];
+        if (r1SponsorNodeId == 0) r1SponsorNodeId = users[_user].sponsorMainNodeId;
+        if (r1SponsorNodeId == 0) r1SponsorNodeId = 1;
+        address sponsor = rankNodes[1][r1SponsorNodeId].owner;
+        if (sponsor == address(0)) sponsor = rankNodes[_targetRank][1].owner;
+
+        uint256 sponsorInTarget = getMainIdNodeInRank(r1SponsorNodeId, _targetRank);
+        newNodeId = _insertNode(_targetRank, _user, sponsor, sponsorInTarget, _overrideParentId, _overrideIsLeft, false, false, _payOnChainRewards);
+
+        nodeOriginMainId[_targetRank][newNodeId] = _r1MainId;
+        nodeDirectSponsorNodeId[_targetRank][newNodeId] = r1SponsorNodeId;
+        mainIdNodeInRank[_r1MainId][_targetRank] = newNodeId;
+        nodeToR1MainId[_targetRank][newNodeId] = _r1MainId;
+
+        emit RankUpgraded(_user, _targetRank - 1, _targetRank, newNodeId, _isAuto);
+    }
+
+    function _insertNode(
         uint8 _rank,
         address _owner,
         address _sponsor,
-        uint256 _parentId,
+        uint256 _sponsorNodeId,
+        uint256 _targetParentId,
         bool _isLeft,
         bool _isClone,
-        bool _isExtraId
+        bool _isExtraId,
+        bool _payOnChainRewards
     ) internal returns (uint256 newNodeId) {
-        if (_parentId == 0 || _parentId > totalNodesInRank[_rank]) revert ErrBadParam();
-        MatrixNode storage parentNode = rankNodes[_rank][_parentId];
-        if (_isLeft ? parentNode.leftChild != 0 : parentNode.rightChild != 0) revert ErrBadParam();
+        uint256 pId = _targetParentId;
+        bool isL = _isLeft;
+        if (
+            pId == 0 ||
+            pId > totalNodesInRank[_rank] ||
+            (isL && rankNodes[_rank][pId].leftChild != 0) ||
+            (!isL && rankNodes[_rank][pId].rightChild != 0)
+        ) {
+            (pId, isL) = _findPlacementSpot(_rank, _sponsor, _sponsorNodeId);
+        }
 
         newNodeId = ++totalNodesInRank[_rank];
         MatrixNode storage n = rankNodes[_rank][newNodeId];
         n.id = newNodeId;
         n.owner = _owner;
         n.directSponsor = _sponsor;
-        n.parentId = _parentId;
+        n.parentId = pId;
         n.isClone = _isClone;
         n.isExtraId = _isExtraId;
 
-        if (_isLeft) {
-            parentNode.leftChild = newNodeId;
+        if (isL) {
+            rankNodes[_rank][pId].leftChild = newNodeId;
         } else {
-            parentNode.rightChild = newNodeId;
+            rankNodes[_rank][pId].rightChild = newNodeId;
         }
 
         if (users[_owner].firstNodeId[_rank] == 0) {
@@ -863,218 +812,90 @@ contract FractalFlowMatrix27 is Ownable, ReentrancyGuard {
         }
         users[_owner].latestNodeId[_rank] = newNodeId;
 
-        emit NodeCreated(_rank, newNodeId, _owner, _sponsor, _parentId, _isLeft, _isClone, _isExtraId);
-    }
-
-    function _placeStandardNode(
-        uint8 _rank,
-        address _owner,
-        address _sponsor,
-        uint256 _sponsorNodeId,
-        bool _payCommission
-    ) internal returns (uint256) {
-        uint256 effSponsor = _sponsorNodeId;
-        if (_rank == 1 && effSponsor == 0) {
-            effSponsor = users[_sponsor].firstNodeId[1];
-            if (effSponsor == 0) effSponsor = 1;
+        if (!_isClone) {
+            nodeOriginMainId[_rank][newNodeId] = newNodeId;
+            nodeDirectSponsorNodeId[_rank][newNodeId] = _sponsorNodeId > 0 ? _sponsorNodeId : 1;
+            if (_rank == 1 && !_isExtraId) {
+                mainIdCurrentMaxRank[newNodeId] = 1;
+                mainIdNodeInRank[newNodeId][1] = newNodeId;
+                nodeToR1MainId[1][newNodeId] = newNodeId;
+            }
         }
 
-        (uint256 parentId, bool isLeft) = _findPlacementSpot(_rank, _sponsor, effSponsor, false);
-        uint256 newNodeId = _insertRawNode(_rank, _owner, _sponsor, parentId, isLeft, false, false);
+        emit NodeCreated(_rank, newNodeId, _owner, _sponsor, pId, isL, _isClone, _isExtraId);
 
-        nodeOriginMainId[_rank][newNodeId] = newNodeId;
-        nodeDirectSponsorNodeId[_rank][newNodeId] = effSponsor > 0 ? effSponsor : 1;
-        if (_rank == 1) {
-            mainIdCurrentMaxRank[newNodeId] = 1;
-            mainIdNodeInRank[newNodeId][1] = newNodeId;
-            nodeToR1MainId[1][newNodeId] = newNodeId;
-        }
-
-        if (isLeft) {
-            if (_payCommission) _distributeLeftChildRewards(_rank, newNodeId, parentId, _owner);
+        if (isL) {
+            if (_payOnChainRewards) _distributeLeftChildRewards(_rank, newNodeId, pId);
         } else {
-            _triggerRightChildClone(_rank, parentId, false);
+            _triggerRightChildClone(_rank, pId, _payOnChainRewards);
         }
-        return newNodeId;
     }
 
-    function _createAndPlaceCloneNode(
+    function _spawnCloneNode(
         uint8 _rank,
         address _owner,
         address _sponsor,
         uint256 _cloneOriginMainId,
         uint256 _targetSponsorNodeId,
-        uint256 _r1SponsorId
-    ) internal returns (uint256) {
-        (uint256 parentId, bool isLeft, uint8 round) = _findClonePlacement(_rank, _sponsor, _targetSponsorNodeId, _cloneOriginMainId);
-        uint256 newNodeId = _insertRawNode(_rank, _owner, _sponsor, parentId, isLeft, true, false);
-
-        uint256 originId = _cloneOriginMainId != 0 ? _cloneOriginMainId : newNodeId;
-        nodeOriginMainId[_rank][newNodeId] = originId;
-        nodeDirectSponsorNodeId[_rank][newNodeId] = _r1SponsorId != 0 ? _r1SponsorId : (_targetSponsorNodeId != 0 ? _targetSponsorNodeId : 1);
-        uint256 r1Main = _rank == 1 ? originId : (originId <= totalNodesInRank[1] ? originId : nodeToR1MainId[_rank][originId]);
-        if (r1Main > 0) nodeToR1MainId[_rank][newNodeId] = r1Main;
-        mainNodeLatestCloneId[_rank][originId] = newNodeId;
-        users[_owner].latestNodeId[_rank] = newNodeId;
-        nodeCloneRound[_rank][newNodeId] = round;
-        nodeCloneTotalCount[_rank][originId] += 1;
-
-        if (isLeft) {
-            _distributeLeftChildRewards(_rank, newNodeId, parentId, _owner);
-        } else {
-            _triggerRightChildClone(_rank, parentId, false);
-        }
-        return newNodeId;
-    }
-
-    function _resolveAutoSponsor(uint8 _rank, uint256 _originId, address _sponsor) internal view returns (uint256 spId, address spAddr) {
-        spId = _originId > 0 ? nodeDirectSponsorNodeId[_rank][_originId] : 0;
-        spAddr = _originId > 0 ? rankNodes[_rank][_originId].directSponsor : _sponsor;
-        if (spId == 0 && _rank > 1 && _originId > 0) {
-            uint256 r1Main = nodeToR1MainId[_rank][_originId];
-            if (r1Main > 0 && r1Main < 1_000_000) {
-                uint256 r1SpId = nodeDirectSponsorNodeId[1][r1Main];
-                if (r1SpId > 0) {
-                    spId = getMainIdNodeInRank(r1SpId, _rank);
-                    if (spId == 0) spId = r1SpId;
-                    if (spAddr == address(0)) spAddr = rankNodes[1][r1Main].directSponsor;
-                }
-            }
-        }
-        if (spId == 0) spId = 1;
-    }
-
-    function _createAndPlaceAutoNode(
-        uint8 _rank,
-        address _owner,
-        address _sponsor,
-        uint256 _sponsorNodeId,
-        bool _isExtraId
-    ) internal returns (uint256) {
-        uint256 effSponsor = _sponsorNodeId;
-        if (_rank == 1 && effSponsor == 0) {
-            effSponsor = users[_sponsor].firstNodeId[1];
-            if (effSponsor == 0) effSponsor = 1;
-        }
-
-        (uint256 parentId, bool isLeft) = _findPlacementSpot(_rank, _sponsor, effSponsor, _isExtraId);
-        uint256 newNodeId = _insertRawNode(_rank, _owner, _sponsor, parentId, isLeft, false, _isExtraId);
-
-        uint256 originId = effSponsor > 0 ? nodeOriginMainId[_rank][effSponsor] : 0;
-        if (originId == 0) originId = effSponsor;
-
-        uint256 spId;
-        address spAddr = _sponsor;
-        if (_isExtraId) {
-            spId = originId > 0 ? nodeToR1MainId[_rank][originId] : 1;
-            if (spId == 0) spId = originId > 0 ? originId : 1;
-        } else {
-            (spId, spAddr) = _resolveAutoSponsor(_rank, originId, _sponsor);
-        }
-        if (spAddr != address(0)) {
-            rankNodes[_rank][newNodeId].directSponsor = spAddr;
-        }
-
-        nodeOriginMainId[_rank][newNodeId] = newNodeId;
-        nodeDirectSponsorNodeId[_rank][newNodeId] = spId;
-        if (_rank == 1 && !_isExtraId) {
-            mainIdCurrentMaxRank[newNodeId] = 1;
-            mainIdNodeInRank[newNodeId][1] = newNodeId;
-            nodeToR1MainId[1][newNodeId] = newNodeId;
-        } else {
-            uint256 extraMainKey = (uint256(_rank) * 1_000_000) + newNodeId;
-            mainIdCurrentMaxRank[extraMainKey] = _rank;
-            mainIdNodeInRank[extraMainKey][_rank] = newNodeId;
-            nodeToR1MainId[_rank][newNodeId] = extraMainKey;
-        }
-
-        if (isLeft) {
-            _distributeLeftChildRewards(_rank, newNodeId, parentId, _owner);
-        } else {
-            _triggerRightChildClone(_rank, parentId, _isExtraId);
-        }
-        return newNodeId;
-    }
-
-    function _findClonePlacement(
-        uint8 _rank,
-        address _sponsor,
-        uint256 _sponsorNodeId,
-        uint256 _cloneOriginMainId
-    ) internal returns (uint256 parentId, bool isLeft, uint8 round) {
-        uint256 originId = _cloneOriginMainId != 0 ? _cloneOriginMainId : _sponsorNodeId;
+        bool _payRewards
+    ) internal returns (uint256 newNodeId) {
+        uint256 originId = _cloneOriginMainId != 0 ? _cloneOriginMainId : 1;
         uint8 currentRound = uint8(nodeCloneTotalCount[_rank][originId] % 2);
         sponsorRoundToggle[_rank][originId] = currentRound == 0 ? 1 : 0;
-        (uint256 pId, bool left) = _findPlacementWithRound(_rank, _sponsor, _sponsorNodeId, currentRound);
-        return (pId, left, currentRound == 0 ? 1 : 2);
+
+        (uint256 pId, bool isL) = currentRound == 0
+            ? _findPlacementSpot(_rank, _sponsor, _targetSponsorNodeId)
+            : _findFirstAvailableUnder(_rank, 1);
+
+        newNodeId = _insertNode(_rank, _owner, _sponsor, _targetSponsorNodeId, pId, isL, true, false, _payRewards);
+        nodeOriginMainId[_rank][newNodeId] = originId;
+        nodeDirectSponsorNodeId[_rank][newNodeId] = _targetSponsorNodeId > 0 ? _targetSponsorNodeId : 1;
+        mainNodeLatestCloneId[_rank][originId] = newNodeId;
+        nodeCloneRound[_rank][newNodeId] = currentRound == 0 ? 1 : 2;
+        nodeCloneTotalCount[_rank][originId] += 1;
     }
 
-    // Unified placement search engine for Extra ID and Direct/Clone
-    function _findPlacementSpot(uint8 _rank, address _sponsor, uint256 _sponsorNodeId, bool _isExtra) internal view returns (uint256, bool) {
-        if (_sponsorNodeId == 0) {
-            if (_rank > 1) return _findFirstAvailableUnder(_rank, 1);
-            _sponsorNodeId = users[_sponsor].firstNodeId[1];
-            if (_sponsorNodeId == 0) return _findFirstAvailableUnder(1, 1);
+    function _triggerRightChildClone(uint8 _rank, uint256 _parentId, bool _payRewards) internal {
+        MatrixNode storage pNode = rankNodes[_rank][_parentId];
+        address parentOwner = pNode.owner;
+        address parentSponsor = pNode.directSponsor != address(0) ? pNode.directSponsor : parentOwner;
+        uint256 originId = nodeOriginMainId[_rank][_parentId];
+        if (originId == 0) originId = _parentId;
+        uint256 spNodeId = nodeDirectSponsorNodeId[_rank][_parentId];
+        if (spNodeId == 0) spNodeId = 1;
+
+        if (_payRewards && gasleft() < 350000) {
+            pendingCloneQueue.push(PendingCloneItem({
+                rank: _rank,
+                parentOwner: parentOwner,
+                parentSponsor: parentSponsor,
+                cloneOriginMainId: originId,
+                targetSponsorNodeId: spNodeId,
+                r1SponsorId: spNodeId
+            }));
+            emit CloneQueued(_rank, originId, spNodeId);
+            return;
         }
 
-        uint256 primaryNodeId = _sponsorNodeId;
-        if (primaryNodeId > totalNodesInRank[_rank]) {
+        _spawnCloneNode(_rank, parentOwner, parentSponsor, originId, spNodeId, _payRewards);
+    }
+
+    function _findPlacementSpot(uint8 _rank, address _sponsor, uint256 _sponsorNodeId) internal view returns (uint256, bool) {
+        uint256 primaryId = _sponsorNodeId > 0 ? _sponsorNodeId : users[_sponsor].firstNodeId[_rank];
+        if (primaryId == 0 || primaryId > totalNodesInRank[_rank]) {
             return _findFirstAvailableUnder(_rank, 1);
         }
 
-        uint256 originTag = nodeOriginMainId[_rank][primaryNodeId];
-        if (originTag == 0) originTag = primaryNodeId;
-        if (!_isExtra && _rank == 1 && originTag <= totalNodesInRank[1]) {
-            primaryNodeId = originTag;
-        }
+        MatrixNode storage primaryNode = rankNodes[_rank][primaryId];
+        if (primaryNode.leftChild == 0) return (primaryId, true);
+        if (primaryNode.rightChild == 0) return (primaryId, false);
 
-        address sponsorOwner = rankNodes[_rank][primaryNodeId].owner;
-        if (sponsorOwner == address(0)) sponsorOwner = _sponsor;
-
-        // 1. Direct sponsor node (Left first, then Right)
-        MatrixNode storage primaryNode = rankNodes[_rank][primaryNodeId];
-        if (primaryNode.leftChild == 0) return (primaryNodeId, true);
-        if (primaryNode.rightChild == 0) return (primaryNodeId, false);
-
-        uint256 total = totalNodesInRank[_rank];
-        // 2. Direct sponsor's clone nodes (check direct leftChild / rightChild across all sponsor clones first)
-        for (uint256 id = 1; id <= total;) {
-            if (_isSpClone(_rank, id, originTag, primaryNodeId)) {
-                MatrixNode memory cNode = rankNodes[_rank][id];
-                if (cNode.leftChild == 0) return (id, true);
-                if (cNode.rightChild == 0) return (id, false);
-            }
-            unchecked {
-                ++id;
-            }
-        }
-
-        // 3. Fallback: Shallowest spot under primary node
-        return _findFirstAvailableUnder(_rank, primaryNodeId);
-    }
-
-    function _isSpClone(uint8 _rank, uint256 _id, uint256 _originTag, uint256 _primaryId) internal view returns (bool) {
-        MatrixNode storage c = rankNodes[_rank][_id];
-        return c.isClone && (nodeOriginMainId[_rank][_id] == _originTag || nodeOriginMainId[_rank][_id] == _primaryId);
-    }
-
-    function _findExtraIdPlacement(uint8 _rank, address _sponsor, uint256 _sponsorNodeId) internal view returns (uint256 parentId, bool isLeft) {
-        return _findPlacementSpot(_rank, _sponsor, _sponsorNodeId, true);
-    }
-
-    function _findDirectAndClonePlacement(uint8 _rank, address _sponsor, uint256 _sponsorNodeId) internal view returns (uint256 parentId, bool isLeft) {
-        return _findPlacementSpot(_rank, _sponsor, _sponsorNodeId, false);
-    }
-
-    function _findPlacementWithRound(uint8 _rank, address _sponsor, uint256 _sponsorNodeId, uint8 _round) internal view returns (uint256 parentId, bool isLeft) {
-        return _round == 0
-            ? _findDirectAndClonePlacement(_rank, _sponsor, _sponsorNodeId)
-            : _findFirstAvailableUnder(_rank, 1);
+        return _findFirstAvailableUnder(_rank, primaryId);
     }
 
     function _findFirstAvailableUnder(uint8 _rank, uint256 _startNodeId) internal view returns (uint256, bool) {
         if (_startNodeId == 0) _startNodeId = 1;
-        uint256[40] memory queue;
+        uint256[32] memory queue;
         uint256 head = 0;
         uint256 tail = 0;
         queue[tail++] = _startNodeId;
@@ -1086,7 +907,7 @@ contract FractalFlowMatrix27 is Ownable, ReentrancyGuard {
             if (node.leftChild == 0) return (currentId, true);
             if (node.rightChild == 0) return (currentId, false);
 
-            if (tail < 38) {
+            if (tail < 30) {
                 queue[tail++] = node.leftChild;
                 queue[tail++] = node.rightChild;
             }
@@ -1108,77 +929,16 @@ contract FractalFlowMatrix27 is Ownable, ReentrancyGuard {
         }
     }
 
-    function _distributeLeftChildRewards(
-        uint8 _rank,
-        uint256 _fromNodeId,
-        uint256 _parentId,
-        address /* _nodeOwner */
-    ) internal {
+    function _distributeLeftChildRewards(uint8 _rank, uint256 _fromNodeId, uint256 _parentId) internal {
         uint256 totalAmount = rankPrice[_rank];
-        uint256 parentOriginMainId = nodeOriginMainId[_rank][_parentId];
-        if (parentOriginMainId == 0) parentOriginMainId = _parentId;
-        bool isParentExtraLineage = rankNodes[_rank][_parentId].isExtraId || rankNodes[_rank][parentOriginMainId].isExtraId;
-
         uint256 directReward = (totalAmount * 30) / 100;
-        uint256 fromR1MainId = _rank == 1 ? nodeOriginMainId[1][_fromNodeId] : nodeToR1MainId[_rank][_fromNodeId];
-        if (fromR1MainId == 0) fromR1MainId = nodeOriginMainId[_rank][_fromNodeId];
-        bool isId1Clone = rankNodes[_rank][_fromNodeId].isClone && (fromR1MainId == 1 || nodeOriginMainId[_rank][_fromNodeId] == 1);
 
-        address sponsor = rankNodes[_rank][_fromNodeId].directSponsor;
         uint256 sponsorNodeId = nodeDirectSponsorNodeId[_rank][_fromNodeId];
-        if (_rank > 1 && fromR1MainId > 1 && fromR1MainId < 1_000_000) {
-            uint256 r1SpId = nodeDirectSponsorNodeId[1][fromR1MainId];
-            if (r1SpId > 0) {
-                sponsorNodeId = r1SpId;
-                if (rankNodes[1][r1SpId].owner != address(0)) {
-                    sponsor = rankNodes[1][r1SpId].owner;
-                }
-            }
-        }
-        if (sponsor == address(0) && sponsorNodeId > 0 && rankNodes[1][sponsorNodeId].owner != address(0)) {
+        address sponsor = rankNodes[_rank][_fromNodeId].directSponsor;
+        if (sponsor == address(0) && sponsorNodeId > 0) {
             sponsor = rankNodes[1][sponsorNodeId].owner;
         }
-        if (sponsorNodeId == 0 && sponsor != address(0)) {
-            sponsorNodeId = users[sponsor].firstNodeId[1];
-            if (sponsorNodeId == 0) sponsorNodeId = users[sponsor].firstNodeId[_rank];
-            if (sponsorNodeId == 0) sponsorNodeId = 1;
-        }
-
-        if (isParentExtraLineage) {
-            uint256 extraSponsorNodeId = nodeDirectSponsorNodeId[_rank][parentOriginMainId];
-            if (extraSponsorNodeId == 0) extraSponsorNodeId = nodeDirectSponsorNodeId[_rank][_parentId];
-            address extraSponsor = rankNodes[_rank][parentOriginMainId].directSponsor;
-            if (extraSponsor == address(0)) extraSponsor = rankNodes[_rank][_parentId].directSponsor;
-            if (extraSponsorNodeId > 0 && rankNodes[1][extraSponsorNodeId].owner != address(0)) {
-                extraSponsor = rankNodes[1][extraSponsorNodeId].owner;
-            } else if (extraSponsorNodeId > 0 && rankNodes[_rank][extraSponsorNodeId].owner != address(0)) {
-                extraSponsor = rankNodes[_rank][extraSponsorNodeId].owner;
-            }
-            if (extraSponsor == address(0)) extraSponsor = rankNodes[_rank][1].owner;
-            if (extraSponsorNodeId == 0) {
-                extraSponsorNodeId = users[extraSponsor].firstNodeId[1];
-                if (extraSponsorNodeId == 0) extraSponsorNodeId = 1;
-            }
-
-            if (isId1Clone || sponsor == address(0)) {
-                _payAndEmit(_fromNodeId, 0, familyPool, _rank, "DIRECT_ID1_CLONE_FAMILY_POOL", directReward);
-            } else {
-                _payAndEmit(_fromNodeId, sponsorNodeId, sponsor, _rank, "DIRECT", directReward);
-            }
-            _payAndEmit(_fromNodeId, extraSponsorNodeId, extraSponsor, _rank, "LEVEL", directReward);
-
-            uint256 extraVaultAmount = (totalAmount * 35) / 100;
-            uint256 sponsorOriginInR = nodeOriginMainId[_rank][extraSponsorNodeId];
-            if (sponsorOriginInR == 0) sponsorOriginInR = extraSponsorNodeId;
-            uint256 sponsorR1MainId = _rank == 1 ? sponsorOriginInR : (extraSponsorNodeId <= totalNodesInRank[1] ? extraSponsorNodeId : nodeToR1MainId[_rank][sponsorOriginInR]);
-            if (sponsorR1MainId == 0) sponsorR1MainId = sponsorOriginInR;
-            mainIdExtraPoolBonus[sponsorR1MainId] += extraVaultAmount;
-            emit RewardDistributed(_fromNodeId, extraSponsorNodeId, extraSponsor, _rank, "UPGRADE_VAULT", extraVaultAmount);
-
-            checkAndProcessAutoExtraIdForNode(extraSponsor, _rank, sponsorR1MainId);
-            _payAllSellAndBot(_fromNodeId, _rank, totalAmount);
-            return;
-        }
+        bool isId1Clone = rankNodes[_rank][_fromNodeId].isClone && nodeOriginMainId[_rank][_fromNodeId] == 1;
 
         if (isId1Clone || sponsor == address(0)) {
             _payAndEmit(_fromNodeId, 0, familyPool, _rank, "DIRECT_ID1_CLONE_FAMILY_POOL", directReward);
@@ -1198,102 +958,17 @@ contract FractalFlowMatrix27 is Ownable, ReentrancyGuard {
             } else {
                 unpaidLevelAmount += levelRewardPerTier;
             }
-            unchecked {
-                ++i;
-            }
+            unchecked { ++i; }
         }
 
         uint256 upgradeAmount = (totalAmount * 35) / 100;
-        address parentOwner = rankNodes[_rank][_parentId].owner;
-
-        uint256 r1MainId = nodeToR1MainId[_rank][_parentId];
-        if (r1MainId == 0) r1MainId = nodeToR1MainId[_rank][parentOriginMainId];
-        if (r1MainId == 0) r1MainId = parentOriginMainId;
-        uint256 vaultTargetNodeId = _rank == 1 ? r1MainId : getMainIdNodeInRank(r1MainId, _rank);
-        if (vaultTargetNodeId == 0) vaultTargetNodeId = parentOriginMainId;
-
-        users[parentOwner].upgradeVault[_rank] += upgradeAmount;
-        nodeUpgradeVault[_rank][vaultTargetNodeId] += upgradeAmount;
-        emit RewardDistributed(_fromNodeId, _parentId, parentOwner, _rank, "UPGRADE_VAULT", upgradeAmount);
-
-        uint8 mRank = getMainIdCurrentRank(r1MainId);
-
-        if (_rank < MAX_RANK && getMainIdNodeInRank(r1MainId, _rank + 1) == 0) {
-            _checkAndProcessAutoUpgradeForMainId(r1MainId, parentOwner, _rank, _parentId);
-        }
-        if (_rank <= 3 || mRank >= 6) {
-            checkAndProcessAutoNewMainIdForNode(r1MainId);
-        }
-        if (_rank >= 4) {
-            checkAndProcessAutoExtraIdForNode(parentOwner, _rank, r1MainId);
-        }
+        uint256 parentOriginId = nodeOriginMainId[_rank][_parentId];
+        if (parentOriginId == 0) parentOriginId = _parentId;
+        _creditVault(_rank, _fromNodeId, parentOriginId, upgradeAmount);
 
         _payAndEmit(_fromNodeId, 0, familyPool, _rank, "UNPAID_LEVEL_FAMILY_POOL", unpaidLevelAmount);
-        _payAllSellAndBot(_fromNodeId, _rank, totalAmount);
-    }
-
-    function _payAllSellAndBot(uint256 _fromNodeId, uint8 _rank, uint256 _totalAmount) internal {
-        _payAndEmit(_fromNodeId, 0, allSellWallet, _rank, "ALLSELL", (_totalAmount * 4) / 100);
-        _payAndEmit(_fromNodeId, 0, botWallet, _rank, "BOT", (_totalAmount * 1) / 100);
-    }
-
-    function _triggerRightChildClone(uint8 _rank, uint256 _parentId, bool /* _isExtraId */) internal {
-        address parentOwner = rankNodes[_rank][_parentId].owner;
-        address parentSponsor = rankNodes[_rank][_parentId].directSponsor;
-        if (parentSponsor == address(0)) parentSponsor = users[parentOwner].sponsor;
-        if (parentSponsor == address(0)) parentSponsor = parentOwner;
-
-        uint256 cloneOriginMainId = nodeOriginMainId[_rank][_parentId];
-        if (cloneOriginMainId == 0) cloneOriginMainId = _parentId;
-
-        uint256 r1MainId = nodeToR1MainId[_rank][_parentId];
-        if (r1MainId == 0 && cloneOriginMainId <= totalNodesInRank[1]) r1MainId = cloneOriginMainId;
-
-        uint256 r1SponsorId = nodeDirectSponsorNodeId[_rank][_parentId];
-        if (r1SponsorId == 0 && _rank > 1 && r1MainId > 0 && r1MainId < 1_000_000) {
-            r1SponsorId = nodeDirectSponsorNodeId[1][r1MainId];
-        }
-
-        uint256 targetSponsorNodeId = 0;
-        if (cloneOriginMainId == 1 || r1MainId == 1 || _parentId == 1) {
-            targetSponsorNodeId = 1;
-        } else if (_rank == 1) {
-            targetSponsorNodeId = r1SponsorId != 0 ? r1SponsorId : 1;
-        } else if (r1SponsorId > 0) {
-            targetSponsorNodeId = getMainIdNodeInRank(r1SponsorId, _rank);
-        }
-
-        // หากแก๊สเหลือจำกัด ให้พักเข้าคิว Pending Clone เพื่อป้องกัน Out-of-Gas และให้ Bot หรือผู้ใช้ประมวลผลเป็น Batch
-        if (gasleft() < 350000) {
-            pendingCloneQueue.push(PendingCloneItem({
-                rank: _rank,
-                parentOwner: parentOwner,
-                parentSponsor: parentSponsor,
-                cloneOriginMainId: cloneOriginMainId,
-                targetSponsorNodeId: targetSponsorNodeId,
-                r1SponsorId: r1SponsorId
-            }));
-            emit CloneQueued(_rank, cloneOriginMainId, targetSponsorNodeId);
-            return;
-        }
-
-        _createAndPlaceCloneNode(_rank, parentOwner, parentSponsor, cloneOriginMainId, targetSponsorNodeId, r1SponsorId);
-    }
-
-    function _checkAndProcessAutoUpgradeForMainId(uint256 _r1MainId, address _user, uint8 _currentRank, uint256 _triggerNodeId) internal {
-        uint8 nextRank = _currentRank + 1;
-        if (nextRank > MAX_RANK) return;
-
-        uint256 nextPrice = rankPrice[nextRank];
-        uint256 currentVault = getAccumulatedVaultForMainId(_r1MainId);
-
-        if (currentVault >= nextPrice && getMainIdNodeInRank(_r1MainId, nextRank) == 0) {
-            uint256 remainder = currentVault - nextPrice;
-            _clearVaultsForMainId(_r1MainId, _currentRank, nextPrice);
-            uint256 newNodeId = _applyRankUpgrade(_r1MainId, _user, nextRank, true);
-
-            _payAndEmit(_triggerNodeId, newNodeId, _user, nextRank - 1, "VAULT_OVERFLOW", remainder);
-        }
+        _payAndEmit(_fromNodeId, 0, allSellWallet, _rank, "ALLSELL", (totalAmount * 4) / 100);
+        _payAndEmit(_fromNodeId, 0, botWallet, _rank, "BOT", (totalAmount * 1) / 100);
     }
 
     function emergencyWithdrawToken(address _token, uint256 _amount) external onlyOwner nonReentrant {
