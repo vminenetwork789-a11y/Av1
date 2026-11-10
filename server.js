@@ -192,16 +192,17 @@ var SERVER_LEGACY_CONTRACTS = /* @__PURE__ */ new Set([
   "0x742d5249758f73683e95e5404d801f2ac6755781",
   "0x51e6fb0c0197f8a26c83d02b47363e90e092eaf4",
   "0xb3084a1d0642f6c269119df5408fb08521e2d70d",
-  "0xd6577d7a36ebd9803479cce3d20fbb4b936275e3"
+  "0xd6577d7a36ebd9803479cce3d20fbb4b936275e3",
+  "0x3ff9a2f8001fb8571fbe056f3390b29ef757b4a3"
 ]);
 var SERVER_LEGACY_USDT = /* @__PURE__ */ new Set([
   "0x95856be9c16afc9c147c034cd6a514d730bd90ba"
 ]);
 var rawEnvContract = (process.env.OVERRIDE_CONTRACT_ADDRESS || process.env.CONTRACT_ADDRESS || "").trim();
-var resolvedDefaultContract = rawEnvContract && !SERVER_LEGACY_CONTRACTS.has(rawEnvContract.toLowerCase()) ? rawEnvContract : "0x3fF9a2F8001fb8571FBE056f3390b29Ef757B4A3";
+var resolvedDefaultContract = rawEnvContract && !SERVER_LEGACY_CONTRACTS.has(rawEnvContract.toLowerCase()) ? rawEnvContract : "0xc630Ef15522eb0259F63Cb19c70d13ef81dCb58c";
 var DEFAULT_SYSTEM_CONFIG = {
   contractAddress: resolvedDefaultContract,
-  buildDefaultContract: "0x3fF9a2F8001fb8571FBE056f3390b29Ef757B4A3",
+  buildDefaultContract: "0xc630Ef15522eb0259F63Cb19c70d13ef81dCb58c",
   usdtAddress: process.env.USDT_ADDRESS || "0x05f24E1F598DF1aE8d0B424ce978f8ea33bB752b",
   chainId: Number(process.env.CHAIN_ID || 97),
   networkName: process.env.NETWORK_NAME || "BNB Smart Chain Testnet",
