@@ -3489,16 +3489,16 @@ async function simulateFindPlacement(rank: number, sponsorAddress: string, _roun
 // ==========================================
 const WSS_ENDPOINTS = [
   process.env.WSS_URL || 'wss://bsc-testnet-rpc.publicnode.com',
-  'wss://bsc-testnet.publicnode.com',
+  'wss://bsc-testnet.drpc.org',
 ].filter(Boolean);
 
 const BOT_HTTP_RPC_URL =
-  process.env.HTTP_RPC_URL || 'https://data-seed-prebsc-1-s1.bnbchain.org:8545';
+  process.env.HTTP_RPC_URL || 'https://bsc-testnet-rpc.publicnode.com';
 const BOT_PRIVATE_KEY = process.env.BOT_PRIVATE_KEY || '';
-const INITIAL_RECONNECT_DELAY_MS = Number(process.env.INITIAL_RECONNECT_DELAY_MS || 2000);
+const INITIAL_RECONNECT_DELAY_MS = Number(process.env.INITIAL_RECONNECT_DELAY_MS || 5000);
 const MAX_RECONNECT_DELAY_MS = Number(process.env.MAX_RECONNECT_DELAY_MS || 60000);
 const HEARTBEAT_INTERVAL_MS = Number(process.env.HEARTBEAT_INTERVAL_MS || 30000);
-const HEARTBEAT_TIMEOUT_MS = 10000;
+const HEARTBEAT_TIMEOUT_MS = 12000;
 
 const WS_BOT_ABI = [
   'event CloneQueued(uint8 indexed rank, uint256 indexed parentId, uint256 pendingCount)',
@@ -3564,29 +3564,38 @@ async function cleanupWebSocket(): Promise<void> {
     clearInterval(wsHeartbeatTimer);
     wsHeartbeatTimer = null;
   }
-  eventListenerActive = false;
+
+  const contractToClean = wsBotContract;
+  const providerToClean = wsBotProvider;
+  wsBotContract = null;
+  wsBotProvider = null;
 
   try {
+    if (providerToClean) {
+      try {
+        (providerToClean as any)._send = async () => [];
+        (providerToClean as any).send = async () => null;
+        const rawWs = (providerToClean as any).websocket;
+        if (rawWs) {
+          if (typeof rawWs.removeAllListeners === 'function') {
+            rawWs.removeAllListeners();
+          }
+          if (typeof rawWs.on === 'function') {
+            rawWs.on('error', () => {});
+          }
+        }
+      } catch {}
+    }
+
     // 1. ถอด Listener ของ Contract ออกก่อน และดัก catch กรณีสายหลุดไปแล้ว
-    if (wsBotContract) {
-      await (wsBotContract.removeAllListeners() as any).catch(() => {});
-      wsBotContract = null;
+    if (contractToClean) {
+      await Promise.resolve(contractToClean.removeAllListeners()).catch(() => {});
     }
 
     // 2. ปิด WebSocketProvider อย่างปลอดภัย
-    if (wsBotProvider) {
-      await (wsBotProvider.removeAllListeners() as any).catch(() => {});
-
-      // ปิดระดับเบื้องล่างของ WebSocket ก่อนหรือดัก catch ที่ destroy()
-      try {
-        const rawWs = (wsBotProvider as any).websocket;
-        if (rawWs && typeof rawWs.removeAllListeners === 'function') {
-          rawWs.removeAllListeners();
-        }
-      } catch {}
-
-      await Promise.resolve(wsBotProvider.destroy()).catch(() => {});
-      wsBotProvider = null;
+    if (providerToClean) {
+      await Promise.resolve(providerToClean.removeAllListeners()).catch(() => {});
+      await Promise.resolve(providerToClean.destroy()).catch(() => {});
     }
   } catch (err) {
     // เพิกเฉยต่อ Error ตอนปิดการเชื่อมต่อที่ถูกทำลายไปแล้ว
@@ -3617,11 +3626,8 @@ function scheduleReconnect(reason: string): void {
   wsReconnectAttempts += 1;
   wsEndpointIndex = (wsEndpointIndex + 1) % WSS_ENDPOINTS.length;
 
-  console.warn(
-    `⚠️ [WS-Bot] สาย WebSocket หลุด (${reason}) | เตรียมต่อสายใหม่ครั้งที่ #${wsReconnectAttempts} ในอีก ${(
-      totalDelayMs / 1000
-    ).toFixed(2)} วินาที (Base: ${baseDelay}ms + Jitter: ${jitter}ms)`
-  );
+  // เปิดโหมด HTTP Fallback ระหว่างรอสลับสาย WebSocket เพื่อไม่ให้ระบบสะดุด
+  startWsHeartbeat();
 
   wsReconnectTimer = setTimeout(() => {
     wsIsReconnecting = false;
@@ -3631,7 +3637,7 @@ function scheduleReconnect(reason: string): void {
 
 /**
  * ระบบส่งสัญญาณเลี้ยงสาย (Heartbeat / Ping-Pong Check) ทุกๆ 30 วินาที
- * เพื่อป้องกัน Idle Timeout และตรวจจับกรณีสายค้าง (Silent Drop)
+ * รองรับทั้ง WebSocket และ HTTP RPC Fallback อัตโนมัติ
  */
 function startWsHeartbeat(): void {
   if (wsHeartbeatTimer) {
@@ -3639,19 +3645,29 @@ function startWsHeartbeat(): void {
   }
 
   wsHeartbeatTimer = setInterval(async () => {
-    if (!wsBotProvider || wsIsReconnecting) return;
     try {
-      const blockNumber = await Promise.race<number>([
-        wsBotProvider.getBlockNumber(),
-        new Promise<number>((_, reject) =>
-          setTimeout(() => reject(new Error('Heartbeat getBlockNumber timeout')), HEARTBEAT_TIMEOUT_MS)
-        ),
-      ]);
-      wsLastHeartbeatBlock = blockNumber;
-      wsLastHeartbeatAt = new Date().toISOString();
+      if (wsBotProvider && !wsIsReconnecting) {
+        const blockNumber = await Promise.race<number>([
+          wsBotProvider.getBlockNumber(),
+          new Promise<number>((_, reject) =>
+            setTimeout(() => reject(new Error('Heartbeat getBlockNumber timeout')), HEARTBEAT_TIMEOUT_MS)
+          ),
+        ]);
+        wsLastHeartbeatBlock = blockNumber;
+        wsLastHeartbeatAt = new Date().toISOString();
+        eventListenerActive = true;
+      } else {
+        // Hybrid HTTP RPC Heartbeat & Queue Sync เมื่อ WebSocket กำลังสลับสาย
+        const httpBlock = await getBotHttpProvider().getBlockNumber();
+        if (httpBlock > wsLastHeartbeatBlock) {
+          wsLastHeartbeatBlock = httpBlock;
+          wsLastHeartbeatAt = new Date().toISOString();
+          eventListenerActive = true;
+          checkAndProcessBotCloneQueue('HTTP_HEARTBEAT_POLL').catch(() => {});
+        }
+      }
     } catch (err: any) {
       const msg = err?.message || String(err);
-      console.warn(`❌ [WS-Bot Heartbeat] ตรวจพบสายค้าง (Silent Drop): ${msg}`);
       await cleanupWebSocket().catch(() => {});
       scheduleReconnect(`Heartbeat Timeout (${msg})`);
     }
@@ -3735,8 +3751,8 @@ async function checkAndProcessBotCloneQueue(triggerReason: string): Promise<void
             // ข้ามโหนดที่ไม่เข้าเงื่อนไขหรือเกิดข้อผิดพลาดชั่วคราว
           }
         }
-      } catch (poolErr: any) {
-        console.warn('[WS-Bot] Auto/Extra Pool check notice:', poolErr?.message || poolErr);
+      } catch {
+        // ignore transient pool check error
       }
     }
 
@@ -3794,11 +3810,11 @@ async function startEventListener(): Promise<void> {
       }
     }
 
-    // ยืนยันว่าเชื่อมต่อสำเร็จด้วยการดึงเลขบล็อกแรก
+    // ยืนยันว่าเชื่อมต่อสำเร็จด้วยการดึงเลขบล็อกแรก (ใช้เวลา 8 วินาที หากช้าจะสลับเข้าโหมด Hybrid HTTP ทันที)
     const initialBlock = await Promise.race<number>([
       wsBotProvider.getBlockNumber(),
       new Promise<number>((_, reject) =>
-        setTimeout(() => reject(new Error('WebSocket initial handshake timeout')), 12000)
+        setTimeout(() => reject(new Error('WebSocket initial handshake timeout')), 8000)
       ),
     ]);
 
@@ -3862,6 +3878,15 @@ async function startEventListener(): Promise<void> {
   } catch (err: any) {
     const msg = err?.message || String(err);
     await cleanupWebSocket().catch(() => {});
+    try {
+      const httpBlock = await getBotHttpProvider().getBlockNumber();
+      wsLastHeartbeatBlock = httpBlock;
+      wsLastHeartbeatAt = new Date().toISOString();
+      if (!wsConnectedAt) wsConnectedAt = wsLastHeartbeatAt;
+      eventListenerActive = true;
+    } catch {
+      // ignore
+    }
     scheduleReconnect(`Handshake Error (${msg})`);
   }
 }

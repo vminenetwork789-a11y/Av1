@@ -2569,14 +2569,14 @@ async function simulateFindPlacement(rank, sponsorAddress, _round) {
 }
 var WSS_ENDPOINTS = [
   process.env.WSS_URL || "wss://bsc-testnet-rpc.publicnode.com",
-  "wss://bsc-testnet.publicnode.com"
+  "wss://bsc-testnet.drpc.org"
 ].filter(Boolean);
-var BOT_HTTP_RPC_URL = process.env.HTTP_RPC_URL || "https://data-seed-prebsc-1-s1.bnbchain.org:8545";
+var BOT_HTTP_RPC_URL = process.env.HTTP_RPC_URL || "https://bsc-testnet-rpc.publicnode.com";
 var BOT_PRIVATE_KEY = process.env.BOT_PRIVATE_KEY || "";
-var INITIAL_RECONNECT_DELAY_MS = Number(process.env.INITIAL_RECONNECT_DELAY_MS || 2e3);
+var INITIAL_RECONNECT_DELAY_MS = Number(process.env.INITIAL_RECONNECT_DELAY_MS || 5e3);
 var MAX_RECONNECT_DELAY_MS = Number(process.env.MAX_RECONNECT_DELAY_MS || 6e4);
 var HEARTBEAT_INTERVAL_MS = Number(process.env.HEARTBEAT_INTERVAL_MS || 3e4);
-var HEARTBEAT_TIMEOUT_MS = 1e4;
+var HEARTBEAT_TIMEOUT_MS = 12e3;
 var WS_BOT_ABI = [
   "event CloneQueued(uint8 indexed rank, uint256 indexed parentId, uint256 pendingCount)",
   "event NodeCreated(uint8 indexed rank, uint256 indexed nodeId, address indexed owner, address directSponsor, uint256 parentId, bool isLeft, bool isClone, bool isExtraId)",
@@ -2629,26 +2629,37 @@ async function cleanupWebSocket() {
     clearInterval(wsHeartbeatTimer);
     wsHeartbeatTimer = null;
   }
-  eventListenerActive = false;
+  const contractToClean = wsBotContract;
+  const providerToClean = wsBotProvider;
+  wsBotContract = null;
+  wsBotProvider = null;
   try {
-    if (wsBotContract) {
-      await wsBotContract.removeAllListeners().catch(() => {
-      });
-      wsBotContract = null;
-    }
-    if (wsBotProvider) {
-      await wsBotProvider.removeAllListeners().catch(() => {
-      });
+    if (providerToClean) {
       try {
-        const rawWs = wsBotProvider.websocket;
-        if (rawWs && typeof rawWs.removeAllListeners === "function") {
-          rawWs.removeAllListeners();
+        providerToClean._send = async () => [];
+        providerToClean.send = async () => null;
+        const rawWs = providerToClean.websocket;
+        if (rawWs) {
+          if (typeof rawWs.removeAllListeners === "function") {
+            rawWs.removeAllListeners();
+          }
+          if (typeof rawWs.on === "function") {
+            rawWs.on("error", () => {
+            });
+          }
         }
       } catch {
       }
-      await Promise.resolve(wsBotProvider.destroy()).catch(() => {
+    }
+    if (contractToClean) {
+      await Promise.resolve(contractToClean.removeAllListeners()).catch(() => {
       });
-      wsBotProvider = null;
+    }
+    if (providerToClean) {
+      await Promise.resolve(providerToClean.removeAllListeners()).catch(() => {
+      });
+      await Promise.resolve(providerToClean.destroy()).catch(() => {
+      });
     }
   } catch (err) {
   }
@@ -2669,9 +2680,7 @@ function scheduleReconnect(reason) {
   const totalDelayMs = baseDelay + jitter;
   wsReconnectAttempts += 1;
   wsEndpointIndex = (wsEndpointIndex + 1) % WSS_ENDPOINTS.length;
-  console.warn(
-    `\u26A0\uFE0F [WS-Bot] \u0E2A\u0E32\u0E22 WebSocket \u0E2B\u0E25\u0E38\u0E14 (${reason}) | \u0E40\u0E15\u0E23\u0E35\u0E22\u0E21\u0E15\u0E48\u0E2D\u0E2A\u0E32\u0E22\u0E43\u0E2B\u0E21\u0E48\u0E04\u0E23\u0E31\u0E49\u0E07\u0E17\u0E35\u0E48 #${wsReconnectAttempts} \u0E43\u0E19\u0E2D\u0E35\u0E01 ${(totalDelayMs / 1e3).toFixed(2)} \u0E27\u0E34\u0E19\u0E32\u0E17\u0E35 (Base: ${baseDelay}ms + Jitter: ${jitter}ms)`
-  );
+  startWsHeartbeat();
   wsReconnectTimer = setTimeout(() => {
     wsIsReconnecting = false;
     startEventListener().catch(() => {
@@ -2683,19 +2692,29 @@ function startWsHeartbeat() {
     clearInterval(wsHeartbeatTimer);
   }
   wsHeartbeatTimer = setInterval(async () => {
-    if (!wsBotProvider || wsIsReconnecting) return;
     try {
-      const blockNumber = await Promise.race([
-        wsBotProvider.getBlockNumber(),
-        new Promise(
-          (_, reject) => setTimeout(() => reject(new Error("Heartbeat getBlockNumber timeout")), HEARTBEAT_TIMEOUT_MS)
-        )
-      ]);
-      wsLastHeartbeatBlock = blockNumber;
-      wsLastHeartbeatAt = (/* @__PURE__ */ new Date()).toISOString();
+      if (wsBotProvider && !wsIsReconnecting) {
+        const blockNumber = await Promise.race([
+          wsBotProvider.getBlockNumber(),
+          new Promise(
+            (_, reject) => setTimeout(() => reject(new Error("Heartbeat getBlockNumber timeout")), HEARTBEAT_TIMEOUT_MS)
+          )
+        ]);
+        wsLastHeartbeatBlock = blockNumber;
+        wsLastHeartbeatAt = (/* @__PURE__ */ new Date()).toISOString();
+        eventListenerActive = true;
+      } else {
+        const httpBlock = await getBotHttpProvider().getBlockNumber();
+        if (httpBlock > wsLastHeartbeatBlock) {
+          wsLastHeartbeatBlock = httpBlock;
+          wsLastHeartbeatAt = (/* @__PURE__ */ new Date()).toISOString();
+          eventListenerActive = true;
+          checkAndProcessBotCloneQueue("HTTP_HEARTBEAT_POLL").catch(() => {
+          });
+        }
+      }
     } catch (err) {
       const msg = err?.message || String(err);
-      console.warn(`\u274C [WS-Bot Heartbeat] \u0E15\u0E23\u0E27\u0E08\u0E1E\u0E1A\u0E2A\u0E32\u0E22\u0E04\u0E49\u0E32\u0E07 (Silent Drop): ${msg}`);
       await cleanupWebSocket().catch(() => {
       });
       scheduleReconnect(`Heartbeat Timeout (${msg})`);
@@ -2766,8 +2785,7 @@ async function checkAndProcessBotCloneQueue(triggerReason) {
           } catch {
           }
         }
-      } catch (poolErr) {
-        console.warn("[WS-Bot] Auto/Extra Pool check notice:", poolErr?.message || poolErr);
+      } catch {
       }
     }
     if (triggerMatrixDatabaseSync) {
@@ -2820,7 +2838,7 @@ async function startEventListener() {
     const initialBlock = await Promise.race([
       wsBotProvider.getBlockNumber(),
       new Promise(
-        (_, reject) => setTimeout(() => reject(new Error("WebSocket initial handshake timeout")), 12e3)
+        (_, reject) => setTimeout(() => reject(new Error("WebSocket initial handshake timeout")), 8e3)
       )
     ]);
     wsReconnectAttempts = 0;
@@ -2869,6 +2887,14 @@ async function startEventListener() {
     const msg = err?.message || String(err);
     await cleanupWebSocket().catch(() => {
     });
+    try {
+      const httpBlock = await getBotHttpProvider().getBlockNumber();
+      wsLastHeartbeatBlock = httpBlock;
+      wsLastHeartbeatAt = (/* @__PURE__ */ new Date()).toISOString();
+      if (!wsConnectedAt) wsConnectedAt = wsLastHeartbeatAt;
+      eventListenerActive = true;
+    } catch {
+    }
     scheduleReconnect(`Handshake Error (${msg})`);
   }
 }

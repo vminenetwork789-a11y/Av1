@@ -23,6 +23,37 @@ import dotenv from 'dotenv';
 
 dotenv.config();
 
+// ป้องกัน Error ภายในของ Ethers v6 (eth_unsubscribe ตอนสาย WebSocket หลุด) ไม่ให้ทำให้โปรเซสบอทเด้งหลุด
+process.on('unhandledRejection', (reason: unknown) => {
+  const errObj = reason as { shortMessage?: string; message?: string; operation?: string; code?: string };
+  const msg = errObj?.shortMessage || errObj?.message || String(reason);
+  if (
+    msg.includes('provider destroyed') ||
+    msg.includes('cancelled request') ||
+    msg.includes('WebSocket was closed') ||
+    errObj?.operation === 'eth_unsubscribe' ||
+    errObj?.code === 'UNSUPPORTED_OPERATION'
+  ) {
+    return;
+  }
+  console.warn('⚠️ [WS-Bot Process Guard] Unhandled Rejection:', msg);
+});
+
+process.on('uncaughtException', (err: unknown) => {
+  const errObj = err as { shortMessage?: string; message?: string; operation?: string; code?: string };
+  const msg = errObj?.shortMessage || errObj?.message || String(err);
+  if (
+    msg.includes('provider destroyed') ||
+    msg.includes('cancelled request') ||
+    msg.includes('WebSocket was closed') ||
+    errObj?.operation === 'eth_unsubscribe' ||
+    errObj?.code === 'UNSUPPORTED_OPERATION'
+  ) {
+    return;
+  }
+  console.error('⚠️ [WS-Bot Process Guard] Uncaught Exception:', msg);
+});
+
 // ============================================================================
 // 1. การตั้งค่าพารามิเตอร์จาก .env (Configuration)
 // ============================================================================
@@ -34,7 +65,8 @@ const CONTRACT_ADDRESS =
 
 const WSS_ENDPOINTS = [
   process.env.WSS_URL || 'wss://bsc-testnet-rpc.publicnode.com',
-  'wss://bsc-testnet.publicnode.com',
+  'wss://bsc-testnet-rpc.publicnode.com',
+  'wss://bsc-testnet.drpc.org',
 ].filter(Boolean);
 
 const HTTP_RPC_ENDPOINTS = [
@@ -121,37 +153,54 @@ export async function cleanupWebSocket(): Promise<void> {
     heartbeatTimer = null;
   }
 
-  if (wsContract) {
-    try {
-      await wsContract.removeAllListeners();
-    } catch {
-      // ignore cleanup errors
-    }
-    wsContract = null;
-  }
+  const contractToClean = wsContract;
+  const providerToClean = wsProvider;
+  wsContract = null;
+  wsProvider = null;
 
-  if (wsProvider) {
+  if (providerToClean) {
+    // ตัดท่อ _send / send ก่อนเรียก removeAllListeners เพื่อไม่ให้ Ethers v6 ส่งคำสั่ง eth_unsubscribe ค้างแล้วระเบิดตอน destroy()
     try {
-      await wsProvider.removeAllListeners();
-    } catch {
-      // ignore
-    }
-
-    try {
-      const rawWs = (wsProvider as unknown as { websocket?: { removeAllListeners?: () => void; close?: () => void } }).websocket;
-      if (rawWs && typeof rawWs.removeAllListeners === 'function') {
-        rawWs.removeAllListeners();
+      const pAny = providerToClean as unknown as {
+        _send?: () => Promise<unknown[]>;
+        send?: () => Promise<unknown>;
+        websocket?: { removeAllListeners?: () => void; on?: (ev: string, cb: () => void) => void; close?: () => void };
+      };
+      pAny._send = async () => [];
+      pAny.send = async () => null;
+      if (pAny.websocket) {
+        if (typeof pAny.websocket.removeAllListeners === 'function') {
+          pAny.websocket.removeAllListeners();
+        }
+        if (typeof pAny.websocket.on === 'function') {
+          pAny.websocket.on('error', () => {});
+        }
       }
     } catch {
       // ignore
     }
+  }
+
+  if (contractToClean) {
+    try {
+      await Promise.resolve(contractToClean.removeAllListeners()).catch(() => {});
+    } catch {
+      // ignore cleanup errors
+    }
+  }
+
+  if (providerToClean) {
+    try {
+      await Promise.resolve(providerToClean.removeAllListeners()).catch(() => {});
+    } catch {
+      // ignore
+    }
 
     try {
-      await wsProvider.destroy();
+      await Promise.resolve(providerToClean.destroy()).catch(() => {});
     } catch {
       // ignore destroy errors on already closed socket
     }
-    wsProvider = null;
   }
 }
 
@@ -178,11 +227,14 @@ function scheduleReconnect(reason: string): void {
   reconnectAttempts += 1;
   wssEndpointIndex = (wssEndpointIndex + 1) % WSS_ENDPOINTS.length;
 
-  console.warn(
-    `⚠️ [WS-Bot] สายหลุด (${reason}) | กำลังเตรียมต่อสายใหม่ครั้งที่ #${reconnectAttempts} ในอีก ${(
+  console.log(
+    `🔄 [WS-Bot] สายหลุด (${reason}) | สลับเข้าโหมด Hybrid HTTP Polling ชั่วคราว และเตรียมต่อสาย WebSocket ใหม่ครั้งที่ #${reconnectAttempts} ในอีก ${(
       totalDelayMs / 1000
-    ).toFixed(2)} วินาที (Base: ${exponentialDelay}ms + Jitter: ${jitter}ms)...`
+    ).toFixed(2)} วินาที...`
   );
+
+  // เปิดโหมด HTTP Heartbeat ระหว่างรอต่อสาย WebSocket ใหม่
+  startHeartbeat();
 
   reconnectTimer = setTimeout(async () => {
     isReconnecting = false;
@@ -199,19 +251,25 @@ function startHeartbeat(): void {
   }
 
   heartbeatTimer = setInterval(async () => {
-    if (!wsProvider || isReconnecting || isShuttingDown) return;
+    if (isShuttingDown) return;
 
     try {
-      const blockNumber = await Promise.race<number>([
-        wsProvider.getBlockNumber(),
-        new Promise<number>((_, reject) =>
-          setTimeout(() => reject(new Error('Heartbeat getBlockNumber timeout')), HEARTBEAT_TIMEOUT_MS)
-        ),
-      ]);
-      console.log(`💓 [WS-Bot Heartbeat] สายสัญญาณปกติ | บล็อกปัจจุบัน: #${blockNumber}`);
+      if (wsProvider && !isReconnecting) {
+        const blockNumber = await Promise.race<number>([
+          wsProvider.getBlockNumber(),
+          new Promise<number>((_, reject) =>
+            setTimeout(() => reject(new Error('Heartbeat getBlockNumber timeout')), HEARTBEAT_TIMEOUT_MS)
+          ),
+        ]);
+        console.log(`💓 [WS-Bot Heartbeat] สายสัญญาณปกติ | บล็อกปัจจุบัน: #${blockNumber}`);
+      } else {
+        const httpBlock = await getHttpProvider().getBlockNumber();
+        console.log(`💓 [WS-Bot HTTP-Fallback Heartbeat] บล็อกปัจจุบัน: #${httpBlock}`);
+        await checkAndProcessPendingQueues('HTTP_HEARTBEAT_FALLBACK');
+      }
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
-      console.error(`❌ [WS-Bot Heartbeat] ตรวจพบสายค้างหรือขาดการตอบสนอง (${msg})`);
+      console.log(`🔄 [WS-Bot Heartbeat] สลับสายสัญญาณใหม่ (${msg})`);
       await cleanupWebSocket();
       scheduleReconnect('Heartbeat Timeout / Silent Drop');
     }
@@ -361,7 +419,7 @@ export async function connectWebSocket(): Promise<void> {
 
     const handleSocketClose = async (code?: unknown) => {
       if (isShuttingDown) return;
-      console.warn(`🔌 [WS-Bot] WebSocket ถูกตัดการเชื่อมต่อ (Code: ${String(code ?? 'unknown')})`);
+      console.log(`🔌 [WS-Bot] WebSocket ถูกตัดการเชื่อมต่อ (Code: ${String(code ?? 'unknown')})`);
       await cleanupWebSocket();
       scheduleReconnect(`Socket Closed (${String(code ?? 'unknown')})`);
     };
@@ -369,7 +427,7 @@ export async function connectWebSocket(): Promise<void> {
     const handleSocketError = async (err: unknown) => {
       if (isShuttingDown) return;
       const msg = err instanceof Error ? err.message : String(err);
-      console.error(`⚠️ [WS-Bot] WebSocket Error: ${msg}`);
+      console.log(`🔌 [WS-Bot] WebSocket Notice: ${msg}`);
     };
 
     if (rawWs) {
@@ -386,7 +444,7 @@ export async function connectWebSocket(): Promise<void> {
     const currentBlock = await Promise.race<number>([
       wsProvider.getBlockNumber(),
       new Promise<number>((_, reject) =>
-        setTimeout(() => reject(new Error('Initial WebSocket handshake timeout')), 12000)
+        setTimeout(() => reject(new Error('Initial WebSocket handshake timeout')), 8000)
       ),
     ]);
 
@@ -450,9 +508,10 @@ export async function connectWebSocket(): Promise<void> {
     await checkAndProcessPendingQueues('RECONNECT_RECOVERY');
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
-    console.error(`❌ [WS-Bot] เชื่อมต่อ WebSocket ไม่สำเร็จ: ${msg}`);
+    console.log(`🔄 [WS-Bot] WebSocket Handshake ช้าหรือถูกจำกัด (${msg}) -> ทำงานต่อผ่านโหมด Hybrid HTTP RPC ทันที`);
     await cleanupWebSocket();
-    scheduleReconnect(`Connection Failed (${msg})`);
+    await checkAndProcessPendingQueues('HTTP_FALLBACK_RECOVERY');
+    scheduleReconnect(`Connection Fallback (${msg})`);
   }
 }
 
