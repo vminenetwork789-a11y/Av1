@@ -246,6 +246,7 @@ const SERVER_LEGACY_CONTRACTS = new Set([
   '0x98c2b26e052c63e3f520c75428cea3cb5e0649e0',
   '0x742d5249758f73683e95e5404d801f2ac6755781',
   '0x51e6fb0c0197f8a26c83d02b47363e90e092eaf4',
+  '0xb3084a1d0642f6c269119df5408fb08521e2d70d',
 ]);
 
 const SERVER_LEGACY_USDT = new Set([
@@ -260,11 +261,11 @@ const rawEnvContract = (
 const resolvedDefaultContract =
   rawEnvContract && !SERVER_LEGACY_CONTRACTS.has(rawEnvContract.toLowerCase())
     ? rawEnvContract
-    : '0xb3084A1D0642f6c269119df5408fb08521e2d70D';
+    : '0xd6577D7A36EBD9803479cCe3D20FBB4b936275e3';
 
 const DEFAULT_SYSTEM_CONFIG = {
   contractAddress: resolvedDefaultContract,
-  buildDefaultContract: '0xb3084A1D0642f6c269119df5408fb08521e2d70D',
+  buildDefaultContract: '0xd6577D7A36EBD9803479cCe3D20FBB4b936275e3',
   usdtAddress: process.env.USDT_ADDRESS || '0x05f24E1F598DF1aE8d0B424ce978f8ea33bB752b',
   chainId: Number(process.env.CHAIN_ID || 97),
   networkName: process.env.NETWORK_NAME || 'BNB Smart Chain Testnet',
@@ -8502,6 +8503,10 @@ async function startApp() {
   app.post('/api/admin/clear-cache', async (_req: Request, res: Response) => {
     try {
       rankSyncTimestamps.clear();
+      inMemoryDB.users.clear();
+      inMemoryDB.nodes.clear();
+      inMemoryDB.rewardLogs = [];
+      inMemoryDB.upgradeLogs = [];
       for (let r = 1; r <= 27; r++) {
         matrixDB.nodesByRank[r] = [];
         matrixDB.rankCounts[r] = 0;

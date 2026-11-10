@@ -46,6 +46,7 @@ import {
   Bell,
   Clock,
   Calculator,
+  Trash2,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { emitTransactionToast } from './TransactionToast';
@@ -825,6 +826,82 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
   const [isWalletIdsModalOpen, setIsWalletIdsModalOpen] = useState<boolean>(false);
   const [selectedInspectWallet, setSelectedInspectWallet] = useState<string>('');
   const [vaultLedgerFilter, setVaultLedgerFilter] = useState<'all' | 'in' | 'out'>('all');
+  const [isClearingMatrixCache, setIsClearingMatrixCache] = useState<boolean>(false);
+  const [matrixCacheClearedDone, setMatrixCacheClearedDone] = useState<boolean>(false);
+
+  const handleClearMatrixCache = async () => {
+    if (isClearingMatrixCache) return;
+    setIsClearingMatrixCache(true);
+    setMatrixCacheClearedDone(false);
+    const toastId = `clear-cache-${Date.now()}`;
+    emitTransactionToast({
+      id: toastId,
+      status: 'pending',
+      step: '🧹 กำลังล้างแคชเบราว์เซอร์ + ฐานข้อมูล และดึงข้อมูลสดจากสัญญาใหม่...',
+      message: `Contract: ${contractAddress || CONTRACT_ADDRESS}`,
+    });
+    try {
+      if (typeof window !== 'undefined') {
+        try {
+          const keepLang = window.localStorage.getItem('f27_lang');
+          window.localStorage.clear();
+          if (keepLang) window.localStorage.setItem('f27_lang', keepLang);
+        } catch {
+          // ignore
+        }
+        try {
+          window.sessionStorage.clear();
+        } catch {
+          // ignore
+        }
+        if ('caches' in window && window.caches) {
+          try {
+            const keys = await window.caches.keys();
+            await Promise.all(keys.map((k) => window.caches.delete(k)));
+          } catch {
+            // ignore
+          }
+        }
+      }
+
+      perIdReportsMapRef.current.clear();
+      setPerIdReportsMap(new Map());
+      setModalUpgradeMessage(null);
+      setModalUpgradeError(null);
+
+      await fetch('/api/admin/clear-cache', {
+        method: 'POST',
+        headers: { 'Cache-Control': 'no-cache, no-store' },
+      }).catch(() => {});
+
+      await Promise.all([
+        loadOnChainTree(selectedRank, { silent: false, forceSync: true }),
+        fetchPerIdHistoryForModal(true),
+      ]);
+
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('matrix:tree:refresh'));
+      }
+
+      setMatrixCacheClearedDone(true);
+      emitTransactionToast({
+        id: toastId,
+        status: 'confirmed',
+        step: '🧹 ล้างแคชและดึงข้อมูลจากสัญญาใหม่สำเร็จ!',
+        message: `ซิงค์ข้อมูลสดจาก Smart Contract (${(contractAddress || CONTRACT_ADDRESS).slice(0, 6)}...${(contractAddress || CONTRACT_ADDRESS).slice(-4)}) ครบทุกแรงค์เรียบร้อยแล้ว`,
+      });
+      setTimeout(() => setMatrixCacheClearedDone(false), 3500);
+    } catch (err: any) {
+      emitTransactionToast({
+        id: toastId,
+        status: 'error',
+        step: 'ล้างแคชไม่สำเร็จ',
+        message: err?.message || 'เกิดข้อผิดพลาดในการล้างแคช',
+      });
+    } finally {
+      setIsClearingMatrixCache(false);
+    }
+  };
 
   // Compact 3-Level "ผังต้นไม้ (Matrix Tree View • 3 ชั้น)" state (alongside the full Binary Tree)
   const buildInitial3LevelMatrixNodes = () => [
@@ -5498,6 +5575,30 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
           >
             <span>{autoFollowNewNodes ? '🟢 ต่อผังอัตโนมัติ: เปิด' : '⚪ ต่อผังอัตโนมัติ: ปิด'}</span>
           </button>
+          <button
+            type="button"
+            onClick={handleClearMatrixCache}
+            disabled={isClearingMatrixCache}
+            className={`px-2.5 py-0.5 rounded-lg text-[11px] font-extrabold border transition cursor-pointer flex items-center gap-1 shadow-sm disabled:opacity-60 ${
+              matrixCacheClearedDone
+                ? 'bg-emerald-500/25 border-emerald-400 text-emerald-200'
+                : 'bg-rose-500/20 hover:bg-rose-500/35 border-rose-500/50 text-rose-200 hover:text-white'
+            }`}
+            title="ล้างแคชเบราว์เซอร์ + ล้างแคชฐานข้อมูลเซิร์ฟเวอร์ และดึงข้อมูลสดจาก Smart Contract ใหม่ครบ 27 แรงค์"
+          >
+            {isClearingMatrixCache ? (
+              <RefreshCw className="w-3 h-3 animate-spin text-rose-300" />
+            ) : (
+              <Trash2 className="w-3 h-3 text-rose-300" />
+            )}
+            <span>
+              {isClearingMatrixCache
+                ? 'กำลังล้างแคช...'
+                : matrixCacheClearedDone
+                ? '✅ ล้างแคชแล้ว!'
+                : '🧹 ล้างแคช'}
+            </span>
+          </button>
         </div>
 
         {/* Row 3: Mode Switcher Buttons */}
@@ -6189,6 +6290,32 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
                   }`}
                 />
                 <span>{isLoadingTree || isLiveSyncing ? '...' : 'ดึงทันที'}</span>
+              </button>
+
+              {/* Instant Clear Cache Button */}
+              <button
+                type="button"
+                onClick={handleClearMatrixCache}
+                disabled={isClearingMatrixCache}
+                className={`px-2.5 py-1 rounded-xl border transition cursor-pointer flex items-center gap-1 font-extrabold text-[11px] disabled:opacity-50 ${
+                  matrixCacheClearedDone
+                    ? 'bg-emerald-500/25 border-emerald-400 text-emerald-200'
+                    : 'bg-rose-500/20 hover:bg-rose-500/35 border-rose-500/50 text-rose-200 hover:text-white'
+                }`}
+                title="ล้างแคชเบราว์เซอร์และเซิร์ฟเวอร์ แล้วดึงข้อมูลสดจาก Smart Contract ใหม่ทันที"
+              >
+                {isClearingMatrixCache ? (
+                  <RefreshCw className="w-3 h-3 animate-spin text-rose-300" />
+                ) : (
+                  <Trash2 className="w-3 h-3 text-rose-300" />
+                )}
+                <span>
+                  {isClearingMatrixCache
+                    ? 'ล้าง...'
+                    : matrixCacheClearedDone
+                    ? 'ล้างแล้ว!'
+                    : 'ล้างแคช'}
+                </span>
               </button>
 
               {/* Last Sync Timestamp */}
@@ -7454,14 +7581,40 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
                   </div>
                 </div>
 
-                <button
-                  type="button"
-                  onClick={() => setExpandedBenefitNodeId(null)}
-                  className="p-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-slate-400 hover:text-white border border-slate-700 transition cursor-pointer shrink-0"
-                  title="ปิดหน้าต่างป๊อปอัพ"
-                >
-                  <X className="w-5 h-5" />
-                </button>
+                <div className="flex items-center gap-2 shrink-0">
+                  <button
+                    type="button"
+                    onClick={handleClearMatrixCache}
+                    disabled={isClearingMatrixCache}
+                    className={`px-2.5 py-1.5 rounded-xl border text-[11px] font-extrabold transition cursor-pointer flex items-center gap-1 disabled:opacity-50 ${
+                      matrixCacheClearedDone
+                        ? 'bg-emerald-500/25 border-emerald-400 text-emerald-200'
+                        : 'bg-rose-500/20 hover:bg-rose-500/35 border-rose-500/50 text-rose-200 hover:text-white'
+                    }`}
+                    title="ล้างแคชและซิงค์สถานะ Rank / กระปุกใหม่จาก Smart Contract"
+                  >
+                    {isClearingMatrixCache ? (
+                      <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                    ) : (
+                      <Trash2 className="w-3.5 h-3.5" />
+                    )}
+                    <span>
+                      {isClearingMatrixCache
+                        ? 'กำลังล้าง...'
+                        : matrixCacheClearedDone
+                        ? 'ล้างแล้ว!'
+                        : '🧹 ล้างแคช'}
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setExpandedBenefitNodeId(null)}
+                    className="p-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-slate-400 hover:text-white border border-slate-700 transition cursor-pointer shrink-0"
+                    title="ปิดหน้าต่างป๊อปอัพ"
+                  >
+                    <X className="w-5 h-5" />
+                  </button>
+                </div>
               </div>
 
               {/* Status Banner when upgrading inside Modal */}
