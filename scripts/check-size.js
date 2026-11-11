@@ -55,15 +55,5 @@ console.log(`Compiled in ${((Date.now() - startTime) / 1000).toFixed(2)}s`);
       console.log(`❌ EXCEEDS EIP-170 by ${sizeInBytes - 24576} bytes!`);
     } else {
       console.log(`✅ UNDER LIMIT! Remaining headroom: ${24576 - sizeInBytes} bytes.`);
-      const artifactPath = path.resolve('src/contracts/FractalFlowMatrix27.artifact.json');
-      const artifact = {
-        contractName: 'FractalFlowMatrix27',
-        abi: matrixContract.abi,
-        bytecode: '0x' + matrixContract.evm.bytecode.object,
-        deployedBytecode: '0x' + deployedBytecode,
-      };
-      fs.writeFileSync(artifactPath, JSON.stringify(artifact, null, 2), 'utf8');
-      console.log(`✅ Updated ${artifactPath}`);
-    }
   }
-
+}

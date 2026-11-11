@@ -23,37 +23,6 @@ import dotenv from 'dotenv';
 
 dotenv.config();
 
-// ป้องกัน Error ภายในของ Ethers v6 (eth_unsubscribe ตอนสาย WebSocket หลุด) ไม่ให้ทำให้โปรเซสบอทเด้งหลุด
-process.on('unhandledRejection', (reason: unknown) => {
-  const errObj = reason as { shortMessage?: string; message?: string; operation?: string; code?: string };
-  const msg = errObj?.shortMessage || errObj?.message || String(reason);
-  if (
-    msg.includes('provider destroyed') ||
-    msg.includes('cancelled request') ||
-    msg.includes('WebSocket was closed') ||
-    errObj?.operation === 'eth_unsubscribe' ||
-    errObj?.code === 'UNSUPPORTED_OPERATION'
-  ) {
-    return;
-  }
-  console.warn('⚠️ [WS-Bot Process Guard] Unhandled Rejection:', msg);
-});
-
-process.on('uncaughtException', (err: unknown) => {
-  const errObj = err as { shortMessage?: string; message?: string; operation?: string; code?: string };
-  const msg = errObj?.shortMessage || errObj?.message || String(err);
-  if (
-    msg.includes('provider destroyed') ||
-    msg.includes('cancelled request') ||
-    msg.includes('WebSocket was closed') ||
-    errObj?.operation === 'eth_unsubscribe' ||
-    errObj?.code === 'UNSUPPORTED_OPERATION'
-  ) {
-    return;
-  }
-  console.error('⚠️ [WS-Bot Process Guard] Uncaught Exception:', msg);
-});
-
 // ============================================================================
 // 1. การตั้งค่าพารามิเตอร์จาก .env (Configuration)
 // ============================================================================
@@ -61,12 +30,11 @@ const CONTRACT_ADDRESS =
   process.env.OVERRIDE_CONTRACT_ADDRESS ||
   process.env.CONTRACT_ADDRESS ||
   process.env.VITE_CONTRACT_ADDRESS ||
-  '0xc630Ef15522eb0259F63Cb19c70d13ef81dCb58c';
+  '0x05cf73c0B412e17FAC31305936d25A7fa1622771';
 
 const WSS_ENDPOINTS = [
   process.env.WSS_URL || 'wss://bsc-testnet-rpc.publicnode.com',
-  'wss://bsc-testnet-rpc.publicnode.com',
-  'wss://bsc-testnet.drpc.org',
+  'wss://bsc-testnet.publicnode.com',
 ].filter(Boolean);
 
 const HTTP_RPC_ENDPOINTS = [
@@ -82,8 +50,7 @@ const INITIAL_DELAY_MS = Number(process.env.INITIAL_RECONNECT_DELAY_MS || 2000);
 const MAX_DELAY_MS = Number(process.env.MAX_RECONNECT_DELAY_MS || 60000);
 const HEARTBEAT_INTERVAL_MS = Number(process.env.HEARTBEAT_INTERVAL_MS || 30000);
 const HEARTBEAT_TIMEOUT_MS = 10000;
-const BATCH_SIZE = BigInt(process.env.BATCH_SIZE || 3);
-const MAX_CLONE_BATCH_SIZE = Number(process.env.BATCH_SIZE || 3);
+const MAX_CLONE_BATCH_SIZE = 5;
 
 // ============================================================================
 // 2. ABI สำหรับการดักฟัง Event และการสั่งประมวลผลคิวโคลน / Auto ID / Extra ID
@@ -153,54 +120,37 @@ export async function cleanupWebSocket(): Promise<void> {
     heartbeatTimer = null;
   }
 
-  const contractToClean = wsContract;
-  const providerToClean = wsProvider;
-  wsContract = null;
-  wsProvider = null;
-
-  if (providerToClean) {
-    // ตัดท่อ _send / send ก่อนเรียก removeAllListeners เพื่อไม่ให้ Ethers v6 ส่งคำสั่ง eth_unsubscribe ค้างแล้วระเบิดตอน destroy()
+  if (wsContract) {
     try {
-      const pAny = providerToClean as unknown as {
-        _send?: () => Promise<unknown[]>;
-        send?: () => Promise<unknown>;
-        websocket?: { removeAllListeners?: () => void; on?: (ev: string, cb: () => void) => void; close?: () => void };
-      };
-      pAny._send = async () => [];
-      pAny.send = async () => null;
-      if (pAny.websocket) {
-        if (typeof pAny.websocket.removeAllListeners === 'function') {
-          pAny.websocket.removeAllListeners();
-        }
-        if (typeof pAny.websocket.on === 'function') {
-          pAny.websocket.on('error', () => {});
-        }
+      await wsContract.removeAllListeners();
+    } catch {
+      // ignore cleanup errors
+    }
+    wsContract = null;
+  }
+
+  if (wsProvider) {
+    try {
+      await wsProvider.removeAllListeners();
+    } catch {
+      // ignore
+    }
+
+    try {
+      const rawWs = (wsProvider as unknown as { websocket?: { removeAllListeners?: () => void; close?: () => void } }).websocket;
+      if (rawWs && typeof rawWs.removeAllListeners === 'function') {
+        rawWs.removeAllListeners();
       }
     } catch {
       // ignore
     }
-  }
-
-  if (contractToClean) {
-    try {
-      await Promise.resolve(contractToClean.removeAllListeners()).catch(() => {});
-    } catch {
-      // ignore cleanup errors
-    }
-  }
-
-  if (providerToClean) {
-    try {
-      await Promise.resolve(providerToClean.removeAllListeners()).catch(() => {});
-    } catch {
-      // ignore
-    }
 
     try {
-      await Promise.resolve(providerToClean.destroy()).catch(() => {});
+      await wsProvider.destroy();
     } catch {
       // ignore destroy errors on already closed socket
     }
+    wsProvider = null;
   }
 }
 
@@ -227,14 +177,11 @@ function scheduleReconnect(reason: string): void {
   reconnectAttempts += 1;
   wssEndpointIndex = (wssEndpointIndex + 1) % WSS_ENDPOINTS.length;
 
-  console.log(
-    `🔄 [WS-Bot] สายหลุด (${reason}) | สลับเข้าโหมด Hybrid HTTP Polling ชั่วคราว และเตรียมต่อสาย WebSocket ใหม่ครั้งที่ #${reconnectAttempts} ในอีก ${(
+  console.warn(
+    `⚠️ [WS-Bot] สายหลุด (${reason}) | กำลังเตรียมต่อสายใหม่ครั้งที่ #${reconnectAttempts} ในอีก ${(
       totalDelayMs / 1000
-    ).toFixed(2)} วินาที...`
+    ).toFixed(2)} วินาที (Base: ${exponentialDelay}ms + Jitter: ${jitter}ms)...`
   );
-
-  // เปิดโหมด HTTP Heartbeat ระหว่างรอต่อสาย WebSocket ใหม่
-  startHeartbeat();
 
   reconnectTimer = setTimeout(async () => {
     isReconnecting = false;
@@ -251,25 +198,19 @@ function startHeartbeat(): void {
   }
 
   heartbeatTimer = setInterval(async () => {
-    if (isShuttingDown) return;
+    if (!wsProvider || isReconnecting || isShuttingDown) return;
 
     try {
-      if (wsProvider && !isReconnecting) {
-        const blockNumber = await Promise.race<number>([
-          wsProvider.getBlockNumber(),
-          new Promise<number>((_, reject) =>
-            setTimeout(() => reject(new Error('Heartbeat getBlockNumber timeout')), HEARTBEAT_TIMEOUT_MS)
-          ),
-        ]);
-        console.log(`💓 [WS-Bot Heartbeat] สายสัญญาณปกติ | บล็อกปัจจุบัน: #${blockNumber}`);
-      } else {
-        const httpBlock = await getHttpProvider().getBlockNumber();
-        console.log(`💓 [WS-Bot HTTP-Fallback Heartbeat] บล็อกปัจจุบัน: #${httpBlock}`);
-        await checkAndProcessPendingQueues('HTTP_HEARTBEAT_FALLBACK');
-      }
+      const blockNumber = await Promise.race<number>([
+        wsProvider.getBlockNumber(),
+        new Promise<number>((_, reject) =>
+          setTimeout(() => reject(new Error('Heartbeat getBlockNumber timeout')), HEARTBEAT_TIMEOUT_MS)
+        ),
+      ]);
+      console.log(`💓 [WS-Bot Heartbeat] สายสัญญาณปกติ | บล็อกปัจจุบัน: #${blockNumber}`);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
-      console.log(`🔄 [WS-Bot Heartbeat] สลับสายสัญญาณใหม่ (${msg})`);
+      console.error(`❌ [WS-Bot Heartbeat] ตรวจพบสายค้างหรือขาดการตอบสนอง (${msg})`);
       await cleanupWebSocket();
       scheduleReconnect('Heartbeat Timeout / Silent Drop');
     }
@@ -304,160 +245,22 @@ export async function checkAndProcessPendingQueues(triggerSource: string): Promi
         const botWallet = new ethers.Wallet(BOT_PRIVATE_KEY, httpProvider);
         const writeContract = new ethers.Contract(CONTRACT_ADDRESS, BOT_CONTRACT_ABI, botWallet);
 
-        let loopSafety = 0;
-        let consecutiveErrors = 0;
-        // ตัดแบ่งรอบการทำงานเป็นก้อนเล็กๆ (BATCH_SIZE) เพื่อป้องกันแก๊สเกินขีดจำกัด และรันต่อได้แม้เกิด Error
-        while (pendingCloneCount > 0n && loopSafety < 25 && consecutiveErrors < 3) {
-          loopSafety++;
-          const iterationsToRun =
-            pendingCloneCount < BATCH_SIZE ? pendingCloneCount : BATCH_SIZE;
-          console.log(
-            `⏳ [WS-Bot] (${triggerSource}) กำลังรันคิวจำนวน ${iterationsToRun.toString()} รายการเพื่อประหยัด Gas...`
-          );
-
-          try {
-            // ตรวจสอบ Gas Limit ตอนส่งธุรกรรม: คำนวณ estimateGas และเผื่อ Buffer 20%
-            let gasLimit = 800000n;
-            try {
-              const estGas = await writeContract.processCloneQueue.estimateGas(iterationsToRun);
-              const buffered = (estGas * 120n) / 100n;
-              gasLimit = buffered > 5000000n ? 5000000n : buffered < 350000n ? 350000n : buffered;
-            } catch {
-              gasLimit = 800000n;
-            }
-
-            const tx = await writeContract.processCloneQueue(iterationsToRun, { gasLimit });
-            console.log(
-              `⏳ [WS-Bot] ส่ง TX สำเร็จ: ${tx.hash} (GasLimit: ${gasLimit.toString()}) | รอการยืนยันบล็อก...`
-            );
-            await tx.wait(1);
-            consecutiveErrors = 0;
-            console.log(`✅ [WS-Bot] ประมวลผลคิวโคลนสำเร็จ! TX: ${tx.hash}`);
-          } catch (batchErr: unknown) {
-            const errMsg = batchErr instanceof Error ? batchErr.message : String(batchErr);
-            console.error(`⚠️ [WS-Bot] เกิดข้อผิดพลาดขณะรันคิว (${iterationsToRun.toString()} รายการ): ${errMsg}`);
-            // Fallback: ลดขนาดเป็น 1 รายการเพื่อให้ระบบสามารถรันต่อไปได้แม้เกิด Error
-            if (iterationsToRun > 1n) {
-              try {
-                console.log('🔄 [WS-Bot] ปรับลดขนาดเป็น 1 รายการและรันต่ออัตโนมัติ...');
-                const singleTx = await writeContract.processCloneQueue(1n, { gasLimit: 600000n });
-                await singleTx.wait(1);
-                consecutiveErrors = 0;
-                console.log(`✅ [WS-Bot] ประมวลผลคิวเดี่ยวสำเร็จ! TX: ${singleTx.hash}`);
-              } catch (singleErr: unknown) {
-                consecutiveErrors++;
-                const sMsg = singleErr instanceof Error ? singleErr.message : String(singleErr);
-                console.warn(`⚠️ [WS-Bot] คิวเดี่ยวไม่สำเร็จ (${consecutiveErrors}/3): ${sMsg} -> ข้ามและรันต่อ`);
-              }
-            } else {
-              consecutiveErrors++;
-            }
-          }
-
+        while (pendingCloneCount > 0n) {
+          const batchSize =
+            pendingCloneCount > BigInt(MAX_CLONE_BATCH_SIZE)
+              ? BigInt(MAX_CLONE_BATCH_SIZE)
+              : pendingCloneCount;
+          console.log(`🚀 [WS-Bot] กำลังส่งธุรกรรม processCloneQueue(${batchSize}) ผ่าน HTTP RPC...`);
+          const tx = await writeContract.processCloneQueue(batchSize);
+          console.log(`⏳ [WS-Bot] ส่ง TX สำเร็จ: ${tx.hash} | รอการยืนยันบล็อก...`);
+          await tx.wait(1);
+          console.log(`✅ [WS-Bot] ประมวลผลคิวโคลนสำเร็จ! TX: ${tx.hash}`);
           pendingCloneCount = await readContract.getPendingCloneCount().catch(() => 0n);
         }
       } else {
         console.warn(
           '⚠️ [WS-Bot] พบคิวโคลนค้างแต่ยังไม่ได้ตั้งค่า BOT_PRIVATE_KEY ใน .env (ทำงานในโหมดดักฟังและซิงค์ข้อมูล)'
         );
-      }
-    }
-
-    // 7.2 ตรวจสอบกระปุก Auto ID & Extra ID บนเชนสำหรับทุกรหัสหลักใน Rank 1 และยิงธุรกรรมให้อัตโนมัติทันทีที่ครบเกณฑ์
-    if (BOT_PRIVATE_KEY && BOT_PRIVATE_KEY.length >= 64) {
-      const botWallet = new ethers.Wallet(BOT_PRIVATE_KEY, httpProvider);
-      const writeContract = new ethers.Contract(CONTRACT_ADDRESS, BOT_CONTRACT_ABI, botWallet);
-
-      try {
-        const [totalR1Big, r1PriceBig] = await Promise.all([
-          readContract.totalNodesInRank(1).catch(() => 0n),
-          readContract.rankPrice(1).catch(() => ethers.parseUnits('5', 18)),
-        ]);
-        const totalR1 = Number(totalR1Big);
-        const minExtraPriceBig = r1PriceBig * 2n; // Rank 2 = 10 USDT
-
-        for (let mId = 1; mId <= totalR1; mId++) {
-          try {
-            const nodeData = await readContract.rankNodes(1, mId);
-            if (!nodeData || nodeData.isClone || nodeData.isExtraId || nodeData.owner === ethers.ZeroAddress) {
-              continue;
-            }
-            const pools = await readContract.getMainIdThreePools(nodeData.owner, mId);
-            let autoIdPoolBig: bigint = pools.newAutoIdPool;
-            const extraIdPoolBig: bigint = pools.newExtraIdPool;
-
-            // ตรวจสอบกับ Database API (/api/matrix/main-id/:mId) เพื่อให้บอทไม่ติดค้างกรณียอดคำนวณในระบบครบ 5.00 USDT แล้ว
-            if (autoIdPoolBig < r1PriceBig) {
-              try {
-                const apiRes = await fetch(`http://localhost:3000/api/matrix/main-id/${mId}`);
-                if (apiRes.ok) {
-                  const apiData = await apiRes.json();
-                  const apiPoolNum = Number(apiData?.newAutoIdPool || 0);
-                  if (apiPoolNum >= 5.0) {
-                    autoIdPoolBig = ethers.parseUnits(apiPoolNum.toFixed(4), 18);
-                  }
-                }
-              } catch {
-                // fallback to on-chain pool
-              }
-            }
-
-            if (r1PriceBig > 0n && autoIdPoolBig >= r1PriceBig) {
-              console.log(
-                `⚡ [WS-Bot] (${triggerSource}) รหัสหลัก #${mId} มียอด Auto ID Pool ครบเกณฑ์ (${ethers.formatUnits(autoIdPoolBig, 18)} U) -> สั่งรัน checkAndProcessAutoNewMainIdForNode(${mId})...`
-              );
-              try {
-                let autoGasLimit = 800000n;
-                try {
-                  const estAuto = await writeContract.checkAndProcessAutoNewMainIdForNode.estimateGas(mId);
-                  const bufAuto = (estAuto * 120n) / 100n;
-                  autoGasLimit = bufAuto > 4000000n ? 4000000n : bufAuto;
-                } catch {
-                  autoGasLimit = 800000n;
-                }
-                const autoTx = await writeContract.checkAndProcessAutoNewMainIdForNode(mId, { gasLimit: autoGasLimit });
-                await autoTx.wait(1);
-                console.log(`✅ [WS-Bot] สร้าง Auto ID สำเร็จสำหรับ Main #${mId}! TX: ${autoTx.hash}`);
-              } catch (txErr: unknown) {
-                const txMsg = txErr instanceof Error ? txErr.message : String(txErr);
-                console.log(`⚠️ [WS-Bot] checkAndProcessAutoNewMainIdForNode(${mId}) notice (ทำงานต่อ): ${txMsg}`);
-              }
-            }
-
-            if (minExtraPriceBig > 0n && extraIdPoolBig >= minExtraPriceBig) {
-              console.log(
-                `⚡ [WS-Bot] (${triggerSource}) รหัสหลัก #${mId} มียอด Extra ID Pool ถึงเกณฑ์ -> สั่งรันสร้าง Extra ID...`
-              );
-              try {
-                let extraTx: any = null;
-                try {
-                  const estExtra = await writeContract.processPendingExtraIdQueue.estimateGas(mId, 2);
-                  const bufExtra = (estExtra * 120n) / 100n;
-                  const extraGasLimit = bufExtra > 4500000n ? 4500000n : bufExtra < 800000n ? 800000n : bufExtra;
-                  extraTx = await writeContract.processPendingExtraIdQueue(mId, 2, { gasLimit: extraGasLimit });
-                } catch {
-                  const curR = Math.max(4, Number(pools.currentRank || 4));
-                  const estNodeExtra = await writeContract.checkAndProcessAutoExtraIdForNode.estimateGas(nodeData.owner, curR, mId);
-                  const bufNodeExtra = (estNodeExtra * 120n) / 100n;
-                  const nodeExtraGas = bufNodeExtra > 5500000n ? 5500000n : bufNodeExtra < 1000000n ? 1000000n : bufNodeExtra;
-                  extraTx = await writeContract.checkAndProcessAutoExtraIdForNode(nodeData.owner, curR, mId, { gasLimit: nodeExtraGas });
-                }
-                if (extraTx) {
-                  await extraTx.wait(1);
-                  console.log(`✅ [WS-Bot] สร้าง Extra ID สำเร็จสำหรับ Main #${mId}! TX: ${extraTx.hash}`);
-                }
-              } catch (extraErr: unknown) {
-                const exMsg = extraErr instanceof Error ? extraErr.message : String(extraErr);
-                console.log(`⚠️ [WS-Bot] AutoExtraId(${mId}) notice (ทำงานต่อ): ${exMsg}`);
-              }
-            }
-          } catch {
-            // ข้ามโหนดที่ไม่เข้าเงื่อนไขหรือเกิดข้อผิดพลาดชั่วคราว และทำงานต่อ
-          }
-        }
-      } catch (poolErr: unknown) {
-        const pMsg = poolErr instanceof Error ? poolErr.message : String(poolErr);
-        console.warn(`⚠️ [WS-Bot] ข้อผิดพลาดขณะเช็คกระปุก Auto/Extra ID (${triggerSource}): ${pMsg}`);
       }
     }
   } catch (err: unknown) {
@@ -468,8 +271,6 @@ export async function checkAndProcessPendingQueues(triggerSource: string): Promi
     isProcessingQueue = false;
   }
 }
-
-export const checkAndClearQueue = checkAndProcessPendingQueues;
 
 // ============================================================================
 // 8. ฟังก์ชันหลักสำหรับเชื่อมต่อ WebSocket และผูก Event Listener (connectWebSocket)
@@ -497,7 +298,7 @@ export async function connectWebSocket(): Promise<void> {
 
     const handleSocketClose = async (code?: unknown) => {
       if (isShuttingDown) return;
-      console.log(`🔌 [WS-Bot] WebSocket ถูกตัดการเชื่อมต่อ (Code: ${String(code ?? 'unknown')})`);
+      console.warn(`🔌 [WS-Bot] WebSocket ถูกตัดการเชื่อมต่อ (Code: ${String(code ?? 'unknown')})`);
       await cleanupWebSocket();
       scheduleReconnect(`Socket Closed (${String(code ?? 'unknown')})`);
     };
@@ -505,7 +306,7 @@ export async function connectWebSocket(): Promise<void> {
     const handleSocketError = async (err: unknown) => {
       if (isShuttingDown) return;
       const msg = err instanceof Error ? err.message : String(err);
-      console.log(`🔌 [WS-Bot] WebSocket Notice: ${msg}`);
+      console.error(`⚠️ [WS-Bot] WebSocket Error: ${msg}`);
     };
 
     if (rawWs) {
@@ -522,7 +323,7 @@ export async function connectWebSocket(): Promise<void> {
     const currentBlock = await Promise.race<number>([
       wsProvider.getBlockNumber(),
       new Promise<number>((_, reject) =>
-        setTimeout(() => reject(new Error('Initial WebSocket handshake timeout')), 8000)
+        setTimeout(() => reject(new Error('Initial WebSocket handshake timeout')), 12000)
       ),
     ]);
 
@@ -586,10 +387,9 @@ export async function connectWebSocket(): Promise<void> {
     await checkAndProcessPendingQueues('RECONNECT_RECOVERY');
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
-    console.log(`🔄 [WS-Bot] WebSocket Handshake ช้าหรือถูกจำกัด (${msg}) -> ทำงานต่อผ่านโหมด Hybrid HTTP RPC ทันที`);
+    console.error(`❌ [WS-Bot] เชื่อมต่อ WebSocket ไม่สำเร็จ: ${msg}`);
     await cleanupWebSocket();
-    await checkAndProcessPendingQueues('HTTP_FALLBACK_RECOVERY');
-    scheduleReconnect(`Connection Fallback (${msg})`);
+    scheduleReconnect(`Connection Failed (${msg})`);
   }
 }
 

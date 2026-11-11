@@ -34,9 +34,6 @@ import {
   Coins,
   ChevronDown,
   ChevronUp,
-  ChevronLeft,
-  ChevronRight,
-  MoveHorizontal,
   X,
   Maximize2,
   Shield,
@@ -46,7 +43,6 @@ import {
   Bell,
   Clock,
   Calculator,
-  Trash2,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { emitTransactionToast } from './TransactionToast';
@@ -791,7 +787,6 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
   >('all');
   const [modalSectionPages, setModalSectionPages] = useState<Record<string, number>>({});
   const [perIdReportsMap, setPerIdReportsMap] = useState<Map<number, any>>(new Map());
-  const perIdReportsMapRef = useRef<Map<number, any>>(new Map());
   const [systemPoolsData, setSystemPoolsData] = useState<any>(null);
   const [isSystemPoolsModalOpen, setIsSystemPoolsModalOpen] = useState<boolean>(false);
   const [systemPoolsModalTab, setSystemPoolsModalTab] = useState<'all' | 'allsell' | 'family'>('all');
@@ -826,82 +821,6 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
   const [isWalletIdsModalOpen, setIsWalletIdsModalOpen] = useState<boolean>(false);
   const [selectedInspectWallet, setSelectedInspectWallet] = useState<string>('');
   const [vaultLedgerFilter, setVaultLedgerFilter] = useState<'all' | 'in' | 'out'>('all');
-  const [isClearingMatrixCache, setIsClearingMatrixCache] = useState<boolean>(false);
-  const [matrixCacheClearedDone, setMatrixCacheClearedDone] = useState<boolean>(false);
-
-  const handleClearMatrixCache = async () => {
-    if (isClearingMatrixCache) return;
-    setIsClearingMatrixCache(true);
-    setMatrixCacheClearedDone(false);
-    const toastId = `clear-cache-${Date.now()}`;
-    emitTransactionToast({
-      id: toastId,
-      status: 'pending',
-      step: '🧹 กำลังล้างแคชเบราว์เซอร์ + ฐานข้อมูล และดึงข้อมูลสดจากสัญญาใหม่...',
-      message: `Contract: ${contractAddress || CONTRACT_ADDRESS}`,
-    });
-    try {
-      if (typeof window !== 'undefined') {
-        try {
-          const keepLang = window.localStorage.getItem('f27_lang');
-          window.localStorage.clear();
-          if (keepLang) window.localStorage.setItem('f27_lang', keepLang);
-        } catch {
-          // ignore
-        }
-        try {
-          window.sessionStorage.clear();
-        } catch {
-          // ignore
-        }
-        if ('caches' in window && window.caches) {
-          try {
-            const keys = await window.caches.keys();
-            await Promise.all(keys.map((k) => window.caches.delete(k)));
-          } catch {
-            // ignore
-          }
-        }
-      }
-
-      perIdReportsMapRef.current.clear();
-      setPerIdReportsMap(new Map());
-      setModalUpgradeMessage(null);
-      setModalUpgradeError(null);
-
-      await fetch('/api/admin/clear-cache', {
-        method: 'POST',
-        headers: { 'Cache-Control': 'no-cache, no-store' },
-      }).catch(() => {});
-
-      await Promise.all([
-        loadOnChainTree(selectedRank, { silent: false, forceSync: true }),
-        fetchPerIdHistoryForModal(true),
-      ]);
-
-      if (typeof window !== 'undefined') {
-        window.dispatchEvent(new CustomEvent('matrix:tree:refresh'));
-      }
-
-      setMatrixCacheClearedDone(true);
-      emitTransactionToast({
-        id: toastId,
-        status: 'confirmed',
-        step: '🧹 ล้างแคชและดึงข้อมูลจากสัญญาใหม่สำเร็จ!',
-        message: `ซิงค์ข้อมูลสดจาก Smart Contract (${(contractAddress || CONTRACT_ADDRESS).slice(0, 6)}...${(contractAddress || CONTRACT_ADDRESS).slice(-4)}) ครบทุกแรงค์เรียบร้อยแล้ว`,
-      });
-      setTimeout(() => setMatrixCacheClearedDone(false), 3500);
-    } catch (err: any) {
-      emitTransactionToast({
-        id: toastId,
-        status: 'error',
-        step: 'ล้างแคชไม่สำเร็จ',
-        message: err?.message || 'เกิดข้อผิดพลาดในการล้างแคช',
-      });
-    } finally {
-      setIsClearingMatrixCache(false);
-    }
-  };
 
   // Compact 3-Level "ผังต้นไม้ (Matrix Tree View • 3 ชั้น)" state (alongside the full Binary Tree)
   const buildInitial3LevelMatrixNodes = () => [
@@ -1031,9 +950,9 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
     });
   };
 
-  const fetchPerIdHistoryForModal = useCallback(async (forceSync?: boolean) => {
+  const fetchPerIdHistoryForModal = useCallback(async () => {
     try {
-      const res = await fetch(`/api/matrix/per-id-history${forceSync ? '?forceSync=1' : ''}`);
+      const res = await fetch('/api/matrix/per-id-history');
       if (res.ok) {
         const data = await res.json();
         if (data?.success) {
@@ -1042,7 +961,6 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
             for (const rep of data.reports) {
               map.set(Number(rep.id), rep);
             }
-            perIdReportsMapRef.current = map;
             setPerIdReportsMap(map);
           }
           if (data.systemPools) {
@@ -1137,12 +1055,6 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
 
   const scrollViewportRef = useRef<HTMLDivElement | null>(null);
   const treeContentRef = useRef<HTMLDivElement | null>(null);
-  const rankScrollRef = useRef<HTMLDivElement | null>(null);
-  const [canScrollLeft, setCanScrollLeft] = useState<boolean>(false);
-  const [canScrollRight, setCanScrollRight] = useState<boolean>(false);
-  const [isTreeOverflowingX, setIsTreeOverflowingX] = useState<boolean>(false);
-  const [scrollProgressPct, setScrollProgressPct] = useState<number>(50);
-  const [hasSwipedTree, setHasSwipedTree] = useState<boolean>(false);
   const [connectorLines, setConnectorLines] = useState<ConnectorLine[]>([]);
   const [isCloneStatusPopupOpen, setIsCloneStatusPopupOpen] = useState<boolean>(false);
   const [isLevelSummaryPopupOpen, setIsLevelSummaryPopupOpen] = useState<boolean>(false);
@@ -1211,11 +1123,6 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
       }
 
       try {
-        if (forceSync || !isSilent || perIdReportsMapRef.current.size === 0) {
-          await fetchPerIdHistoryForModal(forceSync);
-        } else {
-          fetchPerIdHistoryForModal(false).catch(() => {});
-        }
         const activeContract = contractAddress || CONTRACT_ADDRESS;
         let lazyContract: ethers.Contract | null = null;
         const getFallbackContract = async (): Promise<ethers.Contract> => {
@@ -1699,46 +1606,204 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
           }
         }
 
-        // =========================================================================
-        // กฎหลักของระบบ: "ห้ามย้ายตำแหน่ง ลงแล้ว ลงเลย" (PERMANENT IMMUTABLE PLACEMENT)
-        // โหนดทุกโหนด (ทั้ง Main ID, Auto Extra ID, และ Rebirth Clone) เมื่อถูกวางลงผังแล้ว
-        // ตำแหน่ง parentId, leftChild, rightChild จะถูกตรึงไว้ถาวร ห้ามย้าย ห้ามรีเซ็ต
-        // ห้ามนำไปคำนวณใหม่เด็ดขาด ("ลงแล้ว ลงเลย")
-        // =========================================================================
-
-        // 1. ตรวจสอบความสมบูรณ์และตรึงการเชื่อมโยง 2 ทาง (Parent <-> Child Consistency) โดยไม่ย้ายตำแหน่ง
-        for (const node of sMap.values()) {
-          if (node.leftChild > 0) {
-            const left = sMap.get(node.leftChild);
-            if (left && left.parentId <= 0) {
-              left.parentId = node.id;
-            }
+        // 2. Check if any node in Rank 1..27 is actually orphaned (missing parent link on-chain)
+        // Authentic on-chain parentId / leftChild / rightChild placements are always preserved.
+        let needsReplay = false;
+        const cloneSeqByOrig = new Map<number, number>();
+        for (const nid of sIds) {
+          const node = sMap.get(nid)!;
+          if (node.isClone) {
+            const origKey = node.originMainId || node.id;
+            const nextSeq = (cloneSeqByOrig.get(origKey) || 0) + 1;
+            cloneSeqByOrig.set(origKey, nextSeq);
           }
-          if (node.rightChild > 0) {
-            const right = sMap.get(node.rightChild);
-            if (right && right.parentId <= 0) {
-              right.parentId = node.id;
-            }
+          if (nid <= 1) continue;
+          const p = sMap.get(node.parentId);
+          if (!p || (p.leftChild !== node.id && p.rightChild !== node.id)) {
+            needsReplay = true;
+            break;
           }
         }
 
-        for (const node of sMap.values()) {
-          if (node.id <= 1 || node.parentId <= 0) continue;
-          const parent = sMap.get(node.parentId);
-          if (!parent) continue;
-          if (parent.leftChild === node.id || parent.rightChild === node.id) continue;
-          if (!parent.leftChild || parent.leftChild <= 0 || !sMap.has(parent.leftChild)) {
-            parent.leftChild = node.id;
-          } else if (!parent.rightChild || parent.rightChild <= 0 || !sMap.has(parent.rightChild)) {
-            parent.rightChild = node.id;
+        const leftCountBeforeByMain = new Map<number, number>();
+        for (const m of sMap.values()) {
+          if (m.isClone || m.isExtraId) continue;
+          let lc = 0;
+          const mOrig = m.originMainId || m.id;
+          for (const cand of sMap.values()) {
+            const cOrig = cand.originMainId || cand.id;
+            if (
+              (cand.id === m.id || (cand.isClone && (cOrig === m.id || cOrig === mOrig))) &&
+              cand.leftChild > 0 &&
+              sMap.has(cand.leftChild)
+            ) {
+              lc++;
+            }
           }
+          leftCountBeforeByMain.set(m.id, lc);
         }
 
-        // 2. จัดการเฉพาะโหนดใหม่ที่ยังไม่มีตำแหน่งเลย (Unplaced orphan: id > 1 และ parentId <= 0)
-        for (const node of sMap.values()) {
-          if (node.id > 1 && node.parentId <= 0) {
-            const spMainId = node.directSponsorNodeId > 0 ? node.directSponsorNodeId : 1;
-            const spNodeInRank = Array.from(sMap.values()).find(
+        // 3. Chronological replay of Rank 1..27 placements and right-child Rebirth Clone triggers (only if orphaned)
+        if (needsReplay) {
+          const allSnaps = Array.from(sMap.values()).sort((a, b) => a.id - b.id);
+          const rootSnap = sMap.get(1) || allSnaps[0];
+          const nonCloneSnaps = allSnaps.filter((sn) => sn.id !== rootSnap.id && !sn.isClone);
+          const cloneSnapIds = allSnaps
+            .filter((sn) => sn.id !== rootSnap.id && sn.isClone)
+            .map((sn) => sn.id);
+          const cloneSnapTemplates = new Map<number, RankNodeSnapshot>();
+          for (const sn of allSnaps) {
+            if (sn.isClone) cloneSnapTemplates.set(sn.id, sn);
+          }
+
+          rootSnap.parentId = 0;
+          rootSnap.leftChild = 0;
+          rootSnap.rightChild = 0;
+
+          const placedMap = new Map<number, RankNodeSnapshot>();
+          placedMap.set(rootSnap.id, rootSnap);
+          let cloneCursor = 0;
+
+          const findBfsSlot = (startId: number = 1): { parentId: number; isLeft: boolean } => {
+            const q = [placedMap.has(startId) ? startId : rootSnap.id];
+            const vis = new Set<number>();
+            while (q.length > 0) {
+              const curId = q.shift()!;
+              if (vis.has(curId)) continue;
+              vis.add(curId);
+              const cur = placedMap.get(curId);
+              if (!cur) continue;
+              if (!cur.leftChild || !placedMap.has(cur.leftChild)) {
+                return { parentId: cur.id, isLeft: true };
+              }
+              if (!cur.rightChild || !placedMap.has(cur.rightChild)) {
+                return { parentId: cur.id, isLeft: false };
+              }
+              q.push(cur.leftChild, cur.rightChild);
+            }
+            return { parentId: rootSnap.id, isLeft: true };
+          };
+
+          const findSponsorSlot = (spInRankId: number): { parentId: number; isLeft: boolean } => {
+            if (!spInRankId || !placedMap.has(spInRankId)) {
+              return findBfsSlot(1);
+            }
+            const spMain = placedMap.get(spInRankId)!;
+            if (!spMain.leftChild || !placedMap.has(spMain.leftChild)) {
+              return { parentId: spMain.id, isLeft: true };
+            }
+            if (!spMain.rightChild || !placedMap.has(spMain.rightChild)) {
+              return { parentId: spMain.id, isLeft: false };
+            }
+            const spOrigTag = spMain.originMainId || spMain.id;
+            const placedSorted = Array.from(placedMap.values()).sort((a, b) => a.id - b.id);
+            for (const cand of placedSorted) {
+              if (!cand.isClone) continue;
+              const cOrig = cand.originMainId || cand.id;
+              if (cOrig !== spMain.id && cOrig !== spOrigTag) continue;
+              if (!cand.leftChild || !placedMap.has(cand.leftChild)) {
+                return { parentId: cand.id, isLeft: true };
+              }
+              if (!cand.rightChild || !placedMap.has(cand.rightChild)) {
+                return { parentId: cand.id, isLeft: false };
+              }
+            }
+            return findBfsSlot(spMain.id);
+          };
+
+          const spawnTriggeredSnapClones = (initialParent: RankNodeSnapshot) => {
+            const rightQueue: RankNodeSnapshot[] = [initialParent];
+            let guard = 0;
+            while (rightQueue.length > 0 && guard < 100) {
+              guard++;
+              const trigParent = rightQueue.shift()!;
+              const placedArr = Array.from(placedMap.values());
+              const trigOriginNode = !trigParent.isClone
+                ? trigParent
+                : placedArr.find(
+                    (p) =>
+                      !p.isClone &&
+                      (p.id === trigParent.originMainId ||
+                        p.originMainId === trigParent.originMainId)
+                  ) || trigParent;
+
+              const cloneOrigMainId = trigOriginNode.isExtraId
+                ? trigOriginNode.id
+                : trigOriginNode.originMainId || trigOriginNode.id;
+
+              const existingClonesForOrig = placedArr.filter(
+                (p) => p.isClone && (p.originMainId || p.id) === cloneOrigMainId
+              ).length;
+              const roundIdx = existingClonesForOrig % 2;
+
+              let savedSponsorId = trigOriginNode.directSponsorNodeId || 1;
+              let sponsorNodeInRankId = 0;
+              if (cloneOrigMainId === 1 || trigOriginNode.id === 1) {
+                savedSponsorId = 1;
+                sponsorNodeInRankId = 1;
+              } else {
+                const spNodeInR = placedArr.find(
+                  (p) =>
+                    !p.isClone &&
+                    !p.isExtraId &&
+                    (savedSponsorId === 1
+                      ? p.id === 1
+                      : rNum === 1
+                      ? p.id === savedSponsorId
+                      : p.originMainId === savedSponsorId)
+                );
+                sponsorNodeInRankId = spNodeInR ? spNodeInR.id : 0;
+              }
+
+              const cSlot =
+                roundIdx === 0 && sponsorNodeInRankId > 0
+                  ? findSponsorSlot(sponsorNodeInRankId)
+                  : findBfsSlot(1);
+
+              const assignedCloneId =
+                cloneCursor < cloneSnapIds.length
+                  ? cloneSnapIds[cloneCursor++]
+                  : Math.max(
+                      ...Array.from(placedMap.keys()),
+                      ...nonCloneSnaps.map((x) => x.id),
+                      0
+                    ) + 1;
+
+              const template = cloneSnapTemplates.get(assignedCloneId);
+              const cloneSnap: RankNodeSnapshot = {
+                ...(template || {}),
+                id: assignedCloneId,
+                owner: trigOriginNode.owner,
+                directSponsor: trigOriginNode.directSponsor || rootSnap.owner,
+                parentId: cSlot.parentId,
+                leftChild: 0,
+                rightChild: 0,
+                isClone: true,
+                isExtraId: false,
+                originMainId: cloneOrigMainId,
+                directSponsorNodeId: savedSponsorId,
+                nodeVault: 0,
+                originType: 'CLONE',
+              };
+
+              const cParent = placedMap.get(cSlot.parentId);
+              placedMap.set(cloneSnap.id, cloneSnap);
+              if (cParent) {
+                if (cSlot.isLeft) {
+                  cParent.leftChild = cloneSnap.id;
+                } else {
+                  cParent.rightChild = cloneSnap.id;
+                  rightQueue.push(cParent);
+                }
+              }
+            }
+          };
+
+          for (const sn of nonCloneSnaps) {
+            sn.leftChild = 0;
+            sn.rightChild = 0;
+            const spMainId = sn.directSponsorNodeId > 0 ? sn.directSponsorNodeId : 1;
+            const spNodeInRank = Array.from(placedMap.values()).find(
               (p) =>
                 !p.isClone &&
                 !p.isExtraId &&
@@ -1748,61 +1813,46 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
                   ? p.id === spMainId
                   : p.originMainId === spMainId)
             );
-            const q = [spNodeInRank ? spNodeInRank.id : 1];
-            const vis = new Set<number>();
-            let slot = { parentId: 1, isLeft: true };
-            while (q.length > 0) {
-              const curId = q.shift()!;
-              if (vis.has(curId)) continue;
-              vis.add(curId);
-              const cur = sMap.get(curId);
-              if (!cur) continue;
-              if (!cur.leftChild || !sMap.has(cur.leftChild)) {
-                slot = { parentId: cur.id, isLeft: true };
-                break;
-              }
-              if (!cur.rightChild || !sMap.has(cur.rightChild)) {
-                slot = { parentId: cur.id, isLeft: false };
-                break;
-              }
-              q.push(cur.leftChild, cur.rightChild);
-            }
-            const targetParent = sMap.get(slot.parentId) || sMap.get(1);
-            if (targetParent) {
-              node.parentId = targetParent.id;
-              if (slot.isLeft) {
-                targetParent.leftChild = node.id;
-              } else {
-                targetParent.rightChild = node.id;
-              }
+            const slot = spNodeInRank ? findSponsorSlot(spNodeInRank.id) : findBfsSlot(1);
+            const targetParent = placedMap.get(slot.parentId) || rootSnap;
+            sn.parentId = targetParent.id;
+            placedMap.set(sn.id, sn);
+            if (slot.isLeft) {
+              targetParent.leftChild = sn.id;
+            } else {
+              targetParent.rightChild = sn.id;
+              spawnTriggeredSnapClones(targetParent);
             }
           }
-        }
-        if (rNum === activeRank) {
-          rawNodes.clear();
-          const cloneRoundTracker = new Map<number, number>();
-          const finalSnaps = Array.from(sMap.values()).sort((a, b) => a.id - b.id);
+
+          sMap.clear();
+          const finalSnaps = Array.from(placedMap.values()).sort((a, b) => a.id - b.id);
           for (const fs of finalSnaps) {
-            rawNodes.set(fs.id, {
-              id: fs.id,
-              owner: fs.owner,
-              directSponsor: fs.directSponsor,
-              parentId: fs.parentId,
-              leftChild: fs.leftChild,
-              rightChild: fs.rightChild,
-              isClone: fs.isClone,
-              isExtraId: fs.isExtraId,
-            });
-            onChainOriginMap.set(fs.id, fs.originMainId || fs.id);
-            onChainSponsorNodeMap.set(fs.id, fs.directSponsorNodeId || 1);
-            if (fs.isClone) {
-              const origKey = fs.originMainId || fs.id;
-              const nextCnt = (cloneRoundTracker.get(origKey) || 0) + 1;
-              cloneRoundTracker.set(origKey, nextCnt);
-              onChainCloneRoundMap.set(fs.id, ((nextCnt - 1) % 2) + 1);
-            }
-            if (fs.originType) {
-              onChainOriginTypeMap.set(fs.id, fs.originType);
+            sMap.set(fs.id, fs);
+          }
+
+          if (rNum === activeRank) {
+            rawNodes.clear();
+            const cloneRoundTracker = new Map<number, number>();
+            for (const fs of finalSnaps) {
+              rawNodes.set(fs.id, {
+                id: fs.id,
+                owner: fs.owner,
+                directSponsor: fs.directSponsor,
+                parentId: fs.parentId,
+                leftChild: fs.leftChild,
+                rightChild: fs.rightChild,
+                isClone: fs.isClone,
+                isExtraId: fs.isExtraId,
+              });
+              onChainOriginMap.set(fs.id, fs.originMainId || fs.id);
+              onChainSponsorNodeMap.set(fs.id, fs.directSponsorNodeId || 1);
+              if (fs.isClone) {
+                const origKey = fs.originMainId || fs.id;
+                const nextCnt = (cloneRoundTracker.get(origKey) || 0) + 1;
+                cloneRoundTracker.set(origKey, nextCnt);
+                onChainCloneRoundMap.set(fs.id, ((nextCnt - 1) % 2) + 1);
+              }
             }
           }
         }
@@ -2647,54 +2697,24 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
           const deducted = Math.max(0, Number((totalGross1To3 - totalRem1To3).toFixed(4)));
           const maxPossibleSpawns =
             window5Start > 1 ? Math.floor((deducted + 1e-4) / 5) : 0;
-          const rep = perIdReportsMapRef.current.get(r1Id);
-          const repSpawnedCount = Array.isArray(rep?.autoIdsSpawned)
-            ? rep.autoIdsSpawned.length
-            : Number(rep?.totalAutoIdCount || 0);
-          const spawnedCount = Math.max(maxPossibleSpawns, repSpawnedCount);
-
-          // For Root Main ID #1 (which starts at Rank 27 and never pays for rank upgrades),
-          // ensure totalRem1To3 and per-rank snapshot vaults equal totalGross1To3 - spawnedCount * 5
-          if (r1Id === 1 && totalGross1To3 > 0) {
-            const expectedRem1To3 = Math.max(
-              0,
-              Number((totalGross1To3 - spawnedCount * 5).toFixed(4))
-            );
-            let missingRem = Number((expectedRem1To3 - totalRem1To3).toFixed(4));
-            if (missingRem > 1e-4) {
-              remParts.length = 0;
-              totalRem1To3 = 0;
-              extraR2To3Rem = 0;
-              for (let r = 1; r <= 3; r++) {
-                if (r >= window5Start) continue;
-                const snapR = multiRankSnapshots.get(r);
-                const rootSnapInR = snapR?.get(1);
-                if (!snapR || !rootSnapInR) continue;
-                const rUnitVault = (RANK_PRICES_USDT[r - 1] || 5) * 0.35;
-                let lcInR = 0;
-                for (const sn of snapR.values()) {
-                  const isSnRoot = sn.id === 1 || (sn.isClone && (sn.originMainId === 1 || sn.id === 1));
-                  if (isSnRoot && sn.leftChild > 0) lcInR++;
-                }
-                const gR = Number((lcInR * rUnitVault).toFixed(4));
-                let curV = Number((rootSnapInR.nodeVault ?? 0).toFixed(4));
-                const room = Math.max(0, Number((gR - curV).toFixed(4)));
-                if (missingRem > 1e-4 && room > 1e-4) {
-                  const addV = Number(Math.min(room, missingRem).toFixed(4));
-                  curV = Number((curV + addV).toFixed(4));
-                  rootSnapInR.nodeVault = curV;
-                  if (r === activeRank) {
-                    onChainNodeVaultMap.set(1, curV);
-                  }
-                  missingRem = Number((missingRem - addV).toFixed(4));
-                }
-                if (gR > 0 || curV > 0) {
-                  totalRem1To3 = Number((totalRem1To3 + curV).toFixed(4));
-                  if (r > 1) {
-                    extraR2To3Rem = Number((extraR2To3Rem + curV).toFixed(4));
-                  }
-                  remParts.push(`R${r}: ${curV.toFixed(2)}`);
-                }
+          let spawnedCount = 0;
+          if (r1Id === 1) {
+            spawnedCount = maxPossibleSpawns;
+          } else if (perIdReportsMap.has(r1Id)) {
+            // Strictly honor authentic backend/on-chain autoId reports for Main IDs > 1 (e.g. ID #2 where vaults were spent on upgrades)
+            const rep = perIdReportsMap.get(r1Id);
+            spawnedCount = Array.isArray(rep?.autoIdsSpawned) ? rep.autoIdsSpawned.length : (rep?.totalAutoIdCount || 0);
+          } else if (maxPossibleSpawns > 0) {
+            // สำหรับ Main ID > 1 ที่ไม่ได้ใช้ยอดอัปเกรด
+            for (let c = maxPossibleSpawns; c >= 1; c--) {
+              const pool2GrossNeeded = Number((totalRem1To3 + c * 5).toFixed(4));
+              const units175 = pool2GrossNeeded / 1.75;
+              if (
+                pool2GrossNeeded <= totalGross1To3 + 0.01 &&
+                Math.abs(units175 - Math.round(units175)) < 0.01
+              ) {
+                spawnedCount = c;
+                break;
               }
             }
           }
@@ -2759,7 +2779,7 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
 
           const extraLeftVaultBonusGross = crossRankExtraLeftVaultGrossMap.get(r1Id) || 0;
           const totalExtraCostForMain = crossRankExtraCostMap.get(r1Id) || 0;
-          const repExtraBonus = perIdReportsMapRef.current.get(r1Id)?.extraLeftVaultBonus;
+          const repExtraBonus = perIdReportsMap.get(r1Id)?.extraLeftVaultBonus;
 
           let remainingExtraLeftBonus = 0;
           if (typeof repExtraBonus === 'number') {
@@ -2996,14 +3016,13 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
           const explicitSponsorId = onChainSponsorNodeMap.get(n.id) || 0;
           const isBackendTaggedAuto =
             onChainOriginTypeMap.get(n.id) === 'AUTO_NEW_MAIN' ||
-            Boolean((n as any).isSyntheticAutoMain) ||
-            Boolean(perIdReportsMapRef.current.get(n.id)?.isAutoId);
+            Boolean((n as any).isSyntheticAutoMain);
           const priorMains = (ownerAllMainNodesMap.get(ownerKey) || []).filter((mId) => {
             if (mId >= n.id) return false;
             if (getMainIdWindow5Start(mId, n.owner) <= 1) return false;
             const maxAllowedSpawns = crossRankAutoIdCount.get(mId) || 0;
             const currentSpawns = mainNodeAutoIdSpawnCount.get(mId) || 0;
-            if (!isBackendTaggedAuto && currentSpawns >= maxAllowedSpawns) return false;
+            if (currentSpawns >= maxAllowedSpawns) return false;
             // กฎเหล็กการจัดวางบนสัญญา (_findPlacementSpot): Auto ID ที่เกิดจาก mId จะต้องวางอยู่ใต้สายงาน/โคลนของ mId เท่านั้น
             // ดังนั้น R1-#3 (ซึ่งวางอยู่ใต้ #1 ฝั่งขวา ไม่ได้อยู่ใต้ #2) จะไม่มีวันถูกมองเป็น Auto ID ของ #2 เด็ดขาด
             if (!isPlacedUnderMainOrClonesActive(mId, n.id)) return false;
@@ -3034,15 +3053,11 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
               lineageAutoIdVault.set(sourceMain, Number((r1Bal + extraBal).toFixed(4)));
             }
           }
-          if (sourceMain === undefined && isBackendTaggedAuto) {
-            if (priorMains.length > 0) {
-              sourceMain =
-                explicitSponsorId > 0 && priorMains.includes(explicitSponsorId)
-                  ? explicitSponsorId
-                  : priorMains[0];
-            } else {
-              sourceMain = explicitSponsorId > 0 ? explicitSponsorId : firstMainOfOwner;
-            }
+          if (sourceMain === undefined && isBackendTaggedAuto && priorMains.length > 0) {
+            sourceMain =
+              explicitSponsorId > 0 && priorMains.includes(explicitSponsorId)
+                ? explicitSponsorId
+                : priorMains[0];
           }
 
           if (sourceMain !== undefined) {
@@ -3387,16 +3402,14 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
 
           if (!sn.isClone && !sn.isExtraId && id1 > firstMain) {
             const explicitSpId = sn.directSponsorNodeId || 0;
-            const isSnapTaggedAuto =
-              sn.originType === 'AUTO_NEW_MAIN' ||
-              Boolean(perIdReportsMapRef.current.get(id1)?.isAutoId);
+            const isSnapTaggedAuto = sn.originType === 'AUTO_NEW_MAIN';
             // กฎเหล็ก Pool 2: รหัสหลักต้นทาง (m) จะสร้าง New Auto ID ได้ก็ต่อเมื่อพ้นกรอบ 5 rank ย้อนหลังแล้วเท่านั้น (window5Start > 1 คืออยู่ตั้งแต่ Rank 6 ขึ้นไป หรือเป็น Root #1)
             const priorMains = (s1OwnerAllMains.get(oKey) || []).filter((m) => {
               if (m >= id1) return false;
               if (getMainIdWindow5Start(m, sn.owner) <= 1) return false;
               const maxAllowed = crossRankAutoIdCount.get(m) || 0;
               const curSpawns = s1AutoIdCountByMain.get(m) || 0;
-              if (!isSnapTaggedAuto && curSpawns >= maxAllowed) return false;
+              if (curSpawns >= maxAllowed) return false;
               // กฎเหล็กการจัดวางบนสัญญา (_findPlacementSpot): Auto ID ที่เกิดจาก m จะต้องวางอยู่ใต้สายงาน/โคลนของ m เท่านั้น
               if (!isPlacedUnderMainOrClones1(m, id1)) return false;
               const mSpId = snap1.get(m)?.directSponsorNodeId || 1;
@@ -3424,15 +3437,11 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
                 );
               }
             }
-            if (sourceMain === undefined && isSnapTaggedAuto) {
-              if (priorMains.length > 0) {
-                sourceMain =
-                  explicitSpId > 0 && priorMains.includes(explicitSpId)
-                    ? explicitSpId
-                    : priorMains[0];
-              } else {
-                sourceMain = explicitSpId > 0 ? explicitSpId : firstMain;
-              }
+            if (sourceMain === undefined && isSnapTaggedAuto && priorMains.length > 0) {
+              sourceMain =
+                explicitSpId > 0 && priorMains.includes(explicitSpId)
+                  ? explicitSpId
+                  : priorMains[0];
             }
             if (sourceMain !== undefined) {
               s1AutoIdSourceMap.set(id1, sourceMain);
@@ -3508,7 +3517,7 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
           const extraLeftDirect = crossRankExtraLeftDirectBonusMap.get(id1) || 0;
           const extraLeftLevel = crossRankExtraLeftLevelBonusMap.get(id1) || 0;
           const extraLeftVault = crossRankExtraLeftVaultGrossMap.get(id1) || 0;
-          const repForMain = perIdReportsMapRef.current.get(id1);
+          const repForMain = perIdReportsMap.get(id1);
 
           unifiedSummaryByR1Main.set(id1, {
             directRewardAllNodes:
@@ -3676,10 +3685,7 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
             !n.isExtraId &&
             effectiveR1MainId > 1 &&
             (s1AutoIdSourceMap.has(effectiveR1MainId) ||
-              (activeRank === 1 && autoMainNodeIds.has(n.id)) ||
-              onChainOriginTypeMap.get(effectiveR1MainId) === 'AUTO_NEW_MAIN' ||
-              snap1?.get(effectiveR1MainId)?.originType === 'AUTO_NEW_MAIN' ||
-              Boolean(perIdReportsMapRef.current.get(effectiveR1MainId)?.isAutoId)),
+              (activeRank === 1 && autoMainNodeIds.has(n.id))),
           originMainId,
           r1MainId,
           isExtraLineage: isExtraOrigin,
@@ -3696,9 +3702,7 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
           spawnedByMainId:
             s1AutoIdSourceMap.get(effectiveR1MainId) ||
             autoIdSourceMainMap.get(n.id) ||
-            (snap1?.get(effectiveR1MainId)?.originType === 'AUTO_NEW_MAIN'
-              ? snap1?.get(effectiveR1MainId)?.directSponsorNodeId || 1
-              : undefined),
+            undefined,
           directUplineNodeId,
           directRewardThisNode: nodeDirectBonusMap.get(n.id) || 0,
           unilevelRewardThisNode: nodeUnilevelBonusMap.get(n.id) || 0,
@@ -3814,7 +3818,7 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
           isExtraLineage
         );
 
-        const repForTargetMain = perIdReportsMapRef.current.get(targetMainId);
+        const repForTargetMain = perIdReportsMap.get(targetMainId);
         node.upgradeRankPool = isExtraLineage
           ? 0
           : typeof repForTargetMain?.upgradeRankPool === 'number'
@@ -4682,40 +4686,6 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
     });
   }, [activeNodesMap, zoomScale]);
 
-  const updateTreeScrollIndicators = useCallback((markUserSwipe = false) => {
-    const viewportEl = scrollViewportRef.current;
-    if (!viewportEl) return;
-    const maxScrollLeft = Math.max(0, viewportEl.scrollWidth - viewportEl.clientWidth);
-    const currentLeft = Math.max(0, viewportEl.scrollLeft);
-    const overflowing = maxScrollLeft > 8;
-    setIsTreeOverflowingX(overflowing);
-    setCanScrollLeft(overflowing && currentLeft > 6);
-    setCanScrollRight(overflowing && currentLeft < maxScrollLeft - 6);
-    setScrollProgressPct(
-      overflowing && maxScrollLeft > 0
-        ? Math.min(100, Math.max(0, Math.round((currentLeft / maxScrollLeft) * 100)))
-        : 50
-    );
-    if (markUserSwipe && overflowing) {
-      setHasSwipedTree(true);
-    }
-  }, []);
-
-  const scrollTreeHorizontally = useCallback((direction: 'left' | 'right' | 'center') => {
-    const viewportEl = scrollViewportRef.current;
-    if (!viewportEl) return;
-    const maxScrollLeft = Math.max(0, viewportEl.scrollWidth - viewportEl.clientWidth);
-    const step = Math.max(160, Math.round(viewportEl.clientWidth * 0.65));
-    const targetLeft =
-      direction === 'center'
-        ? Math.floor(maxScrollLeft / 2)
-        : direction === 'left'
-        ? Math.max(0, viewportEl.scrollLeft - step)
-        : Math.min(maxScrollLeft, viewportEl.scrollLeft + step);
-    viewportEl.scrollTo({ left: targetLeft, behavior: 'smooth' });
-    setHasSwipedTree(true);
-  }, []);
-
   // Reset horizontal scroll position to center Root Node whenever rank, viewMode, or focusRootId changes
   useLayoutEffect(() => {
     const viewportEl = scrollViewportRef.current;
@@ -4723,24 +4693,18 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
     const centerScroll = () => {
       const maxScrollLeft = Math.max(0, viewportEl.scrollWidth - viewportEl.clientWidth);
       viewportEl.scrollLeft = maxScrollLeft > 0 ? Math.floor(maxScrollLeft / 2) : 0;
-      updateTreeScrollIndicators(false);
     };
     centerScroll();
-    const timer = setTimeout(centerScroll, 60);
+    const timer = setTimeout(centerScroll, 50);
     return () => clearTimeout(timer);
-  }, [selectedRank, viewMode, focusRootId, updateTreeScrollIndicators]);
+  }, [selectedRank, viewMode, focusRootId]);
 
   useLayoutEffect(() => {
     recalculateTreeConnectors();
-    updateTreeScrollIndicators(false);
-    const timer = setTimeout(() => {
-      recalculateTreeConnectors();
-      updateTreeScrollIndicators(false);
-    }, 60);
+    const timer = setTimeout(recalculateTreeConnectors, 60);
     return () => clearTimeout(timer);
   }, [
     recalculateTreeConnectors,
-    updateTreeScrollIndicators,
     focusRootId,
     expandedBenefitNodeId,
     viewMode,
@@ -4755,19 +4719,14 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
     if (!containerEl || typeof ResizeObserver === 'undefined') return;
     const observer = new ResizeObserver(() => {
       recalculateTreeConnectors();
-      updateTreeScrollIndicators(false);
     });
     observer.observe(containerEl);
-    const handleResize = () => {
-      recalculateTreeConnectors();
-      updateTreeScrollIndicators(false);
-    };
-    window.addEventListener('resize', handleResize);
+    window.addEventListener('resize', recalculateTreeConnectors);
     return () => {
       observer.disconnect();
-      window.removeEventListener('resize', handleResize);
+      window.removeEventListener('resize', recalculateTreeConnectors);
     };
-  }, [recalculateTreeConnectors, updateTreeScrollIndicators]);
+  }, [recalculateTreeConnectors]);
 
   const handleAutoFitScreen = useCallback(() => {
     const viewportEl = scrollViewportRef.current;
@@ -5519,9 +5478,9 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
   }
 
   return (
-    <div className="w-full max-w-full min-w-0 overflow-hidden min-h-[calc(100vh-56px)] h-full flex flex-col bg-[#0b1020] border border-slate-800 rounded-xl sm:rounded-2xl p-2 sm:p-4 shadow-2xl space-y-2.5 sm:space-y-3">
+    <div className="w-full max-w-none min-h-[calc(100vh-56px)] h-full flex flex-col bg-[#0b1020] border border-slate-800 rounded-xl sm:rounded-2xl p-2 sm:p-4 shadow-2xl space-y-2.5 sm:space-y-3">
       {/* Top Header & Controls Block (Stacked neatly matching screenshot) */}
-      <div className="flex flex-col gap-2.5 pb-3 border-b border-slate-800/90 min-w-0 max-w-full">
+      <div className="flex flex-col gap-2.5 pb-3 border-b border-slate-800/90">
         {/* Row 1: Title */}
         <div className="flex items-center justify-between gap-2 flex-wrap">
           <h2 className="text-base sm:text-lg font-extrabold text-white flex items-center gap-2">
@@ -5574,30 +5533,6 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
             title="เมื่อมีโหนดใหม่เข้ามา ระบบจะนำโหนดใหม่มาต่อแสดงในผังให้อัตโนมัติทันที"
           >
             <span>{autoFollowNewNodes ? '🟢 ต่อผังอัตโนมัติ: เปิด' : '⚪ ต่อผังอัตโนมัติ: ปิด'}</span>
-          </button>
-          <button
-            type="button"
-            onClick={handleClearMatrixCache}
-            disabled={isClearingMatrixCache}
-            className={`px-2.5 py-0.5 rounded-lg text-[11px] font-extrabold border transition cursor-pointer flex items-center gap-1 shadow-sm disabled:opacity-60 ${
-              matrixCacheClearedDone
-                ? 'bg-emerald-500/25 border-emerald-400 text-emerald-200'
-                : 'bg-rose-500/20 hover:bg-rose-500/35 border-rose-500/50 text-rose-200 hover:text-white'
-            }`}
-            title="ล้างแคชเบราว์เซอร์ + ล้างแคชฐานข้อมูลเซิร์ฟเวอร์ และดึงข้อมูลสดจาก Smart Contract ใหม่ครบ 27 แรงค์"
-          >
-            {isClearingMatrixCache ? (
-              <RefreshCw className="w-3 h-3 animate-spin text-rose-300" />
-            ) : (
-              <Trash2 className="w-3 h-3 text-rose-300" />
-            )}
-            <span>
-              {isClearingMatrixCache
-                ? 'กำลังล้างแคช...'
-                : matrixCacheClearedDone
-                ? '✅ ล้างแคชแล้ว!'
-                : '🧹 ล้างแคช'}
-            </span>
           </button>
         </div>
 
@@ -6292,32 +6227,6 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
                 <span>{isLoadingTree || isLiveSyncing ? '...' : 'ดึงทันที'}</span>
               </button>
 
-              {/* Instant Clear Cache Button */}
-              <button
-                type="button"
-                onClick={handleClearMatrixCache}
-                disabled={isClearingMatrixCache}
-                className={`px-2.5 py-1 rounded-xl border transition cursor-pointer flex items-center gap-1 font-extrabold text-[11px] disabled:opacity-50 ${
-                  matrixCacheClearedDone
-                    ? 'bg-emerald-500/25 border-emerald-400 text-emerald-200'
-                    : 'bg-rose-500/20 hover:bg-rose-500/35 border-rose-500/50 text-rose-200 hover:text-white'
-                }`}
-                title="ล้างแคชเบราว์เซอร์และเซิร์ฟเวอร์ แล้วดึงข้อมูลสดจาก Smart Contract ใหม่ทันที"
-              >
-                {isClearingMatrixCache ? (
-                  <RefreshCw className="w-3 h-3 animate-spin text-rose-300" />
-                ) : (
-                  <Trash2 className="w-3 h-3 text-rose-300" />
-                )}
-                <span>
-                  {isClearingMatrixCache
-                    ? 'ล้าง...'
-                    : matrixCacheClearedDone
-                    ? 'ล้างแล้ว!'
-                    : 'ล้างแคช'}
-                </span>
-              </button>
-
               {/* Last Sync Timestamp */}
               <span className="text-[10px] text-slate-400 font-mono hidden md:inline-block ml-1">
                 {lastSyncTime}
@@ -6325,40 +6234,8 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
             </div>
           </div>
 
-          {/* Horizontal-Scroll-Only Rank Buttons Wrapper with Mobile Touch Indicators */}
-          <div className="relative w-full max-w-full min-w-0">
-            <div className="flex items-center justify-between gap-2 mb-1 sm:hidden px-0.5">
-              <span className="text-[10px] text-slate-400 flex items-center gap-1 font-medium">
-                <MoveHorizontal className="w-3 h-3 text-indigo-400 shrink-0" />
-                <span>ปัดซ้าย-ขวาเพื่อเลือกผัง 1–27</span>
-              </span>
-              <div className="flex items-center gap-1">
-                <button
-                  type="button"
-                  onClick={() =>
-                    rankScrollRef.current?.scrollBy({ left: -180, behavior: 'smooth' })
-                  }
-                  className="min-w-[28px] min-h-[28px] px-1.5 rounded-lg bg-slate-900 border border-slate-800 text-slate-300 flex items-center justify-center active:scale-95"
-                  aria-label="เลื่อนแถบแรงค์ไปทางซ้าย"
-                >
-                  <ChevronLeft className="w-3.5 h-3.5" />
-                </button>
-                <button
-                  type="button"
-                  onClick={() =>
-                    rankScrollRef.current?.scrollBy({ left: 180, behavior: 'smooth' })
-                  }
-                  className="min-w-[28px] min-h-[28px] px-1.5 rounded-lg bg-slate-900 border border-slate-800 text-slate-300 flex items-center justify-center active:scale-95"
-                  aria-label="เลื่อนแถบแรงค์ไปทางขวา"
-                >
-                  <ChevronRight className="w-3.5 h-3.5" />
-                </button>
-              </div>
-            </div>
-            <div
-              ref={rankScrollRef}
-              className="w-full max-w-full matrix-horizontal-scroll-only pb-2 pt-0.5 flex items-center gap-2 select-none"
-            >
+          {/* Horizontal Scrollable Rank Buttons Bar (Design matching Screenshot: [✓ 👑 ผัง 1 62 5U] [✓ ผัง 2 4 10U] [👑 ผัง 3 2 20U] [ผัง 4 30U]) */}
+          <div className="w-full overflow-x-auto pb-2 pt-0.5 scrollbar-thin scrollbar-thumb-indigo-500/40 scrollbar-track-slate-950 flex items-center gap-2 select-none">
             {RANK_PRICES_USDT.map((price, idx) => {
               const r = idx + 1;
               const isSelected = selectedRank === r;
@@ -6457,7 +6334,6 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
                 </button>
               );
             })}
-            </div>
           </div>
         </div>
       </div>
@@ -6596,111 +6472,11 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
         </div>
       )}
 
-      {/* 4. Main Horizontal-Scroll-Only Binary Tree Viewport with Mobile Touch Indicators */}
-      <div className="relative w-full max-w-full min-w-0 flex-1 flex flex-col min-h-[82vh] rounded-xl sm:rounded-2xl bg-[#080c17] border border-slate-800/90 overflow-hidden">
-        {/* Top Touch-Pan & Horizontal Scrollbar Indicator Strip */}
-        <div className="w-full bg-slate-950/95 border-b border-slate-800/80 px-2.5 py-1.5 flex items-center justify-between gap-2 z-20">
-          <div className="flex items-center gap-1.5 min-w-0">
-            <MoveHorizontal className="w-3.5 h-3.5 text-emerald-400 shrink-0 animate-pulse" />
-            <span className="text-[11px] sm:text-xs font-semibold text-slate-200 truncate">
-              {language === 'th'
-                ? 'ปัดซ้าย-ขวาเพื่อเลื่อนดูผังไบนารี่'
-                : 'Swipe left or right to pan tree'}
-            </span>
-          </div>
-
-          <div className="flex items-center gap-1.5 shrink-0">
-            <button
-              type="button"
-              onClick={() => scrollTreeHorizontally('left')}
-              disabled={!canScrollLeft}
-              className="min-h-[34px] min-w-[34px] sm:min-h-[30px] sm:min-w-[30px] px-2 rounded-lg bg-slate-900 hover:bg-slate-800 disabled:opacity-35 border border-slate-700/80 text-slate-200 text-[11px] font-bold flex items-center justify-center gap-0.5 transition cursor-pointer"
-              title="เลื่อนผังไปทางซ้าย"
-            >
-              <ChevronLeft className="w-3.5 h-3.5 text-cyan-300" />
-              <span className="hidden xs:inline">ซ้าย</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => scrollTreeHorizontally('center')}
-              className="min-h-[34px] sm:min-h-[30px] px-2.5 rounded-lg bg-indigo-950/90 hover:bg-indigo-900 border border-indigo-500/40 text-indigo-200 text-[11px] font-bold flex items-center justify-center gap-1 transition cursor-pointer"
-              title="จัดโหนดหลักให้อยู่กึ่งกลางจอ"
-            >
-              <span>กึ่งกลาง</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => scrollTreeHorizontally('right')}
-              disabled={!canScrollRight}
-              className="min-h-[34px] min-w-[34px] sm:min-h-[30px] sm:min-w-[30px] px-2 rounded-lg bg-slate-900 hover:bg-slate-800 disabled:opacity-35 border border-slate-700/80 text-slate-200 text-[11px] font-bold flex items-center justify-center gap-0.5 transition cursor-pointer"
-              title="เลื่อนผังไปทางขวา"
-            >
-              <span className="hidden xs:inline">ขวา</span>
-              <ChevronRight className="w-3.5 h-3.5 text-cyan-300" />
-            </button>
-          </div>
-        </div>
-
-        {/* Visual Horizontal Scroll Progress Track (shown when tree width exceeds screen width) */}
-        {isTreeOverflowingX && (
-          <div className="w-full h-1.5 bg-slate-900/90 relative overflow-hidden z-20">
-            <div
-              className="h-full bg-gradient-to-r from-indigo-500 via-cyan-400 to-emerald-400 rounded-full transition-all duration-150"
-              style={{
-                width: '32%',
-                marginLeft: `${Math.min(68, Math.max(0, Math.round(scrollProgressPct * 0.68)))}%`,
-              }}
-            />
-          </div>
-        )}
-
-        {/* Left Edge Overflow Shadow & Floating Touch Button */}
-        {canScrollLeft && (
-          <div className="pointer-events-none absolute inset-y-10 left-0 w-10 sm:w-12 bg-gradient-to-r from-[#080c17] via-[#080c17]/75 to-transparent z-20 flex items-center justify-start pl-1">
-            <button
-              type="button"
-              onClick={() => scrollTreeHorizontally('left')}
-              className="pointer-events-auto min-w-[40px] min-h-[40px] rounded-full bg-slate-900/90 hover:bg-indigo-600 border border-indigo-400/50 text-white shadow-[0_0_15px_rgba(0,0,0,0.75)] flex items-center justify-center active:scale-95 transition cursor-pointer"
-              aria-label="เลื่อนผังไปทางซ้าย"
-            >
-              <ChevronLeft className="w-5 h-5 text-cyan-300" />
-            </button>
-          </div>
-        )}
-
-        {/* Right Edge Overflow Shadow & Floating Touch Button */}
-        {canScrollRight && (
-          <div className="pointer-events-none absolute inset-y-10 right-0 w-10 sm:w-12 bg-gradient-to-l from-[#080c17] via-[#080c17]/75 to-transparent z-20 flex items-center justify-end pr-1">
-            <button
-              type="button"
-              onClick={() => scrollTreeHorizontally('right')}
-              className="pointer-events-auto min-w-[40px] min-h-[40px] rounded-full bg-slate-900/90 hover:bg-indigo-600 border border-indigo-400/50 text-white shadow-[0_0_15px_rgba(0,0,0,0.75)] flex items-center justify-center active:scale-95 transition cursor-pointer"
-              aria-label="เลื่อนผังไปทางขวา"
-            >
-              <ChevronRight className="w-5 h-5 text-cyan-300" />
-            </button>
-          </div>
-        )}
-
-        {/* Mobile Touch Gesture Floating Pill (auto-hides once user swipes horizontally) */}
-        {isTreeOverflowingX && !hasSwipedTree && (
-          <div
-            onClick={() => setHasSwipedTree(true)}
-            className="sm:hidden absolute top-12 left-1/2 -translate-x-1/2 z-20 px-3 py-1 rounded-full bg-slate-900/95 border border-cyan-400/50 text-cyan-200 text-[10.5px] font-bold shadow-lg flex items-center gap-1.5 cursor-pointer"
-          >
-            <MoveHorizontal className="w-3.5 h-3.5 text-cyan-400 animate-bounce" />
-            <span>แตะเลื่อนซ้าย-ขวาเพื่อดูโหนดทั้งหมด</span>
-          </div>
-        )}
-
-        {/* Horizontal-Scroll-Only Tree Wrapper */}
+      {/* 4. Main Full-Max Height & Full-Max Width Binary Tree Viewport */}
+      <div className="relative w-full max-w-none flex-1 flex flex-col min-h-[85vh]">
         <div
           ref={scrollViewportRef}
-          onScroll={() => updateTreeScrollIndicators(true)}
-          onTouchMove={() => updateTreeScrollIndicators(true)}
-          className="w-full max-w-full min-w-0 flex-1 min-h-[78vh] h-full p-2 sm:p-5 md:p-6 pb-20 sm:pb-24 matrix-horizontal-scroll-only"
+          className="w-full max-w-none flex-1 min-h-[85vh] h-full rounded-xl sm:rounded-2xl bg-[#080c17] border border-slate-800/90 p-2 sm:p-5 md:p-6 pb-20 sm:pb-24 overflow-x-auto overflow-y-auto matrix-scroll-container"
         >
           <div
             style={{
@@ -7147,11 +6923,9 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
         );
 
         // ข้อมูลการนำยอดไปใช้งาน (Deductions / Outflows) ของรหัสหลักนี้
-        const isRootMainId1 = Number(targetMainId) === 1;
-        const upgradesUsed =
-          isRootMainId1 || currentMaxR <= 1
-            ? 0
-            : Number(mainReport?.vaultDeductedBreakdown?.upgradesTotalUsdt ?? 0);
+        const upgradesUsed = Number(
+          mainReport?.vaultDeductedBreakdown?.upgradesTotalUsdt ?? 0
+        );
         const autoIdsCount = Math.max(
           modalNode.totalAutoIdCount || 0,
           autoIdsList.length,
@@ -7277,12 +7051,10 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
           Number((effectiveAutoIdPool + autoIdsUsed).toFixed(2)),
           Number(calculatedAutoGross.toFixed(2))
         );
-        const autoPoolUpgradesUsed = isRootMainId1
-          ? 0
-          : Math.max(
-              0,
-              Number((grossAutoIdPool - effectiveAutoIdPool - autoIdsUsed).toFixed(2))
-            );
+        const autoPoolUpgradesUsed = Math.max(
+          0,
+          Number((grossAutoIdPool - effectiveAutoIdPool - autoIdsUsed).toFixed(2))
+        );
 
         // สูตรคำนวณ Extra ID Pool:
         // 1. รายได้เกิดจากไอดี Extra ID (โบนัส 35% เม็ดซ้ายของ Extra ID ที่เกิดขึ้น)
@@ -7415,32 +7187,9 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
               message: okMsg,
               txHash: confirmedTxHash,
             });
-
-            // อัปเดตสถานะ Rank ของ Main ID ในหน้าต่างทันทีและปลดล็อกปุ่มให้กด Rank ถัดไปได้ทันทีโดยไม่ต้องรอซิงค์ช้า
-            modalNode.targetMainIdCurrentRank = Math.max(
-              Number(modalNode.targetMainIdCurrentRank || 1),
-              rankToUpgrade
-            );
-            setPerIdReportsMap((prev) => {
-              const next = new Map(prev);
-              const existing = next.get(targetMainId);
-              if (existing) {
-                next.set(targetMainId, {
-                  ...existing,
-                  currentMaxRank: Math.max(Number(existing.currentMaxRank || 1), rankToUpgrade),
-                });
-              }
-              return next;
-            });
             setModalUpgradeTargetRank(Math.min(27, rankToUpgrade + 1));
-            setIsModalUpgrading(false);
-
-            // รีเฟรชข้อมูลผังและประวัติจากฐานข้อมูลแบบไม่บล็อกปุ่ม
-            fetchPerIdHistoryForModal(false).catch(() => {});
-            loadOnChainTree(selectedRank, { silent: true, forceSync: false }).catch(() => {});
-            if (typeof window !== 'undefined') {
-              window.dispatchEvent(new CustomEvent('matrix:tree:refresh'));
-            }
+            await fetchPerIdHistoryForModal();
+            await loadOnChainTree(selectedRank, { silent: true, forceSync: true });
           } catch (err: any) {
             const errMsg = err?.message || 'การอัปเกรดแรงค์ล้มเหลว';
             setModalUpgradeMessage(null);
@@ -7581,40 +7330,14 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
                   </div>
                 </div>
 
-                <div className="flex items-center gap-2 shrink-0">
-                  <button
-                    type="button"
-                    onClick={handleClearMatrixCache}
-                    disabled={isClearingMatrixCache}
-                    className={`px-2.5 py-1.5 rounded-xl border text-[11px] font-extrabold transition cursor-pointer flex items-center gap-1 disabled:opacity-50 ${
-                      matrixCacheClearedDone
-                        ? 'bg-emerald-500/25 border-emerald-400 text-emerald-200'
-                        : 'bg-rose-500/20 hover:bg-rose-500/35 border-rose-500/50 text-rose-200 hover:text-white'
-                    }`}
-                    title="ล้างแคชและซิงค์สถานะ Rank / กระปุกใหม่จาก Smart Contract"
-                  >
-                    {isClearingMatrixCache ? (
-                      <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                    ) : (
-                      <Trash2 className="w-3.5 h-3.5" />
-                    )}
-                    <span>
-                      {isClearingMatrixCache
-                        ? 'กำลังล้าง...'
-                        : matrixCacheClearedDone
-                        ? 'ล้างแล้ว!'
-                        : '🧹 ล้างแคช'}
-                    </span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setExpandedBenefitNodeId(null)}
-                    className="p-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-slate-400 hover:text-white border border-slate-700 transition cursor-pointer shrink-0"
-                    title="ปิดหน้าต่างป๊อปอัพ"
-                  >
-                    <X className="w-5 h-5" />
-                  </button>
-                </div>
+                <button
+                  type="button"
+                  onClick={() => setExpandedBenefitNodeId(null)}
+                  className="p-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-slate-400 hover:text-white border border-slate-700 transition cursor-pointer shrink-0"
+                  title="ปิดหน้าต่างป๊อปอัพ"
+                >
+                  <X className="w-5 h-5" />
+                </button>
               </div>
 
               {/* Status Banner when upgrading inside Modal */}
@@ -7781,33 +7504,6 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
                               ยอดสะสมก่อนหัก: {grossAutoIdPool.toFixed(2)} U
                             </span>
                           )}
-                          {!isExtraOrCloneOfExtra && effectiveAutoIdPool >= 5 && (
-                            <button
-                              type="button"
-                              onClick={async () => {
-                                try {
-                                  const res = await fetch('/api/matrix/auto-new-main-id', {
-                                    method: 'POST',
-                                    headers: { 'Content-Type': 'application/json' },
-                                    body: JSON.stringify({ mainId: targetMainId }),
-                                  });
-                                  const json = await res.json();
-                                  await fetchPerIdHistoryForModal(true);
-                                  await loadOnChainTree(selectedRank, { silent: false, forceSync: true });
-                                  if (json?.createdCount > 0) {
-                                    setModalUpgradeMessage(
-                                      `✨ ออก Auto ID ใหม่สำเร็จ +${json.createdCount} รหัส ใน Rank 1!`
-                                    );
-                                  }
-                                } catch (e: any) {
-                                  setModalUpgradeError(e?.message || 'ไม่สามารถออก Auto ID ได้');
-                                }
-                              }}
-                              className="mt-1 w-full py-1 px-1.5 rounded bg-yellow-500 hover:bg-yellow-400 text-slate-950 font-extrabold text-[9.5px] transition cursor-pointer"
-                            >
-                              ⚡ กดออก Auto ID ทันที
-                            </button>
-                          )}
                         </div>
                         <div className="bg-slate-950/90 border border-rose-500/30 rounded p-1.5 text-center space-y-0.5">
                           <span className="text-slate-400 block">Extra ID Pool (รวมยอดเก่า)</span>
@@ -7844,33 +7540,6 @@ export const MatrixTreeVisualizer: React.FC<MatrixTreeVisualizerProps> = ({
                             <span className="text-amber-200 font-semibold text-[9px] block font-mono">
                               รวมยอดเก่าก่อนหัก: {grossExtraIdPool.toFixed(2)} U
                             </span>
-                          )}
-                          {!isExtraOrCloneOfExtra && effectiveExtraIdPool >= 10 && (
-                            <button
-                              type="button"
-                              onClick={async () => {
-                                try {
-                                  const res = await fetch('/api/matrix/auto-extra-id', {
-                                    method: 'POST',
-                                    headers: { 'Content-Type': 'application/json' },
-                                    body: JSON.stringify({ mainId: targetMainId }),
-                                  });
-                                  const json = await res.json();
-                                  await fetchPerIdHistoryForModal(true);
-                                  await loadOnChainTree(selectedRank, { silent: false, forceSync: true });
-                                  if (json?.createdCount > 0) {
-                                    setModalUpgradeMessage(
-                                      `✨ ออก Extra ID ใหม่สำเร็จ +${json.createdCount} รหัส!`
-                                    );
-                                  }
-                                } catch (e: any) {
-                                  setModalUpgradeError(e?.message || 'ไม่สามารถออก Extra ID ได้');
-                                }
-                              }}
-                              className="mt-1 w-full py-1 px-1.5 rounded bg-rose-500 hover:bg-rose-400 text-white font-extrabold text-[9.5px] transition cursor-pointer"
-                            >
-                              ⚡ กดออก Extra ID ทันที
-                            </button>
                           )}
                         </div>
                       </div>

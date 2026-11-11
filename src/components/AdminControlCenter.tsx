@@ -257,16 +257,15 @@ export const AdminControlCenter: React.FC<AdminControlCenterProps> = ({
 
         const receipt: any = await waitWith2_5MinTimeout(tx);
         const hash = receipt?.hash || tx.hash;
+        await fetch('/api/db/sync', { method: 'POST' }).catch(() => {});
+        await fetchAdminOverview();
+        onRefreshOnChainData();
         setActionStatus({
           type: 'success',
           title: `รันคำสั่ง ${actionName} สำเร็จ!`,
           message: `${labelTh} ยืนยันบนบล็อกเชนเรียบร้อยแล้ว`,
           txHash: hash,
         });
-
-        fetch('/api/db/sync', { method: 'POST' }).catch(() => {});
-        fetchAdminOverview().catch(() => {});
-        onRefreshOnChainData();
         return;
       }
 

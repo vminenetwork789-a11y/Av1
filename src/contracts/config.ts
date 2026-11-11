@@ -1,3 +1,8 @@
+export const DEFAULT_CONTRACT_ADDRESS =
+  import.meta.env?.VITE_CONTRACT_ADDRESS || '0x05cf73c0B412e17FAC31305936d25A7fa1622771';
+export const DEFAULT_USDT_ADDRESS =
+  import.meta.env?.VITE_USDT_ADDRESS || '0x05f24E1F598DF1aE8d0B424ce978f8ea33bB752b';
+
 const LEGACY_CONTRACT_ADDRESSES = new Set([
   '0x104d65034b00f0db59497036208f3b798b4c10cc',
   '0x0742e9581217cc8cd6de2aa80b7ce9ad881deee3',
@@ -35,30 +40,11 @@ const LEGACY_CONTRACT_ADDRESSES = new Set([
   '0x982a87f726cc1044a546fa853a425e6f445bca3d',
   '0x3b69efbd1f615cd31e326497555bfa56a194f935',
   '0xda9da3b56b75f5d59ac0b17b402e79dd3dddffba',
-  '0x05cf73c0b412e17fac31305936d25a7fa1622771',
-  '0xed264d4cf339ddc19a0d28206a5f3aed0e1ebb3e',
-  '0x9ed96af9128f0791fd883dee7ade2c728d2cec11',
-  '0xcd581c30aceba9d6c81baaea5b9f88d8aaa54a42',
-  '0xffc4336bb0bb6da36254466a7d0c5e9566ac5349',
-  '0x98c2b26e052c63e3f520c75428cea3cb5e0649e0',
-  '0x742d5249758f73683e95e5404d801f2ac6755781',
-  '0x51e6fb0c0197f8a26c83d02b47363e90e092eaf4',
-  '0xb3084a1d0642f6c269119df5408fb08521e2d70d',
-  '0xd6577d7a36ebd9803479cce3d20fbb4b936275e3',
-  '0x3ff9a2f8001fb8571fbe056f3390b29ef757b4a3',
 ]);
 
 const LEGACY_USDT_ADDRESSES = new Set([
   '0x95856be9c16afc9c147c034cd6a514d730bd90ba',
 ]);
-
-const envContractAddr = import.meta.env?.VITE_CONTRACT_ADDRESS?.trim();
-export const DEFAULT_CONTRACT_ADDRESS =
-  envContractAddr && !LEGACY_CONTRACT_ADDRESSES.has(envContractAddr.toLowerCase())
-    ? envContractAddr
-    : '0xc630Ef15522eb0259F63Cb19c70d13ef81dCb58c';
-export const DEFAULT_USDT_ADDRESS =
-  import.meta.env?.VITE_USDT_ADDRESS || '0x05f24E1F598DF1aE8d0B424ce978f8ea33bB752b';
 
 export const ADMIN_WALLET_ADDRESSES = new Set([
   '0x622e20082e63c7220c5af0a77cbc437a98505311', // Root User / Main ID #1
@@ -285,18 +271,13 @@ export const MATRIX_ABI = [
 
   // State-changing Functions
   'function register(uint256 _sponsorNodeId) external',
-  'function registerWithPayouts(uint256 _sponsorNodeId, uint256 _targetParentId, bool _isLeft, address[] _recipients, uint256[] _amounts, uint256 _vaultTargetNodeId, uint256 _vaultAmount) external',
   'function registerBatch(uint256 _sponsorNodeId, uint256 _count, uint256[] _targetParentIds, bool[] _isLefts, bool[] _isClones) external',
-  'function registerBatchWithPayouts(uint256 _sponsorNodeId, uint256 _count, uint256[] _targetParentIds, bool[] _isLefts, bool[] _isClones, address[] _recipients, uint256[] _amounts, uint256 _vaultTargetNodeId, uint256 _vaultAmount) external',
   'function upgradeRank(uint8 _targetRank) external',
   'function upgradeRankForMainId(uint256 _r1MainId, uint8 _targetRank) external',
-  'function upgradeRankWithPayouts(uint256 _r1MainId, uint8 _targetRank, uint256 _targetParentId, bool _isLeft, address[] _recipients, uint256[] _amounts, uint256 _vaultTargetNodeId, uint256 _vaultAmount) external',
   'function checkAndProcessAutoNewMainId(address _user) external',
   'function checkAndProcessAutoNewMainIdForNode(uint256 _mainNodeId) external',
   'function checkAndProcessAutoExtraId(address _user, uint8 _currentRank) external',
   'function checkAndProcessAutoExtraIdForNode(address _user, uint8 _currentRank, uint256 _sponsorNodeId) external',
-  'function getPendingCloneCount() external view returns (uint256)',
-  'function processCloneQueue(uint256 _maxIterations) external',
   'function processPendingExtraIdQueue(uint256 _r1MainId, uint8 _maxBatch) external returns (uint8 processed)',
   'function adminUpgradeRank(address _user, uint8 _targetRank) external',
   'function adminUpgradeRankForMainId(uint256 _r1MainId, uint8 _targetRank) external',
